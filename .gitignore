@@ -1,0 +1,63 @@
+# ============================================================================
+# TI Code Composer Studio / MSPM0 工程忽略规则
+#
+# 以下工程描述文件必须保留并上传：
+#   .project、.cproject、.ccsproject、.settings/、empty.syscfg
+# 队友需要它们在 CCS 中导入工程并由 SysConfig 重新生成代码。
+# ============================================================================
+
+# CCS 各构建配置的生成目录
+Debug/
+Release/
+
+# 如果以后新建其他常见构建配置，也不提交其生成结果
+Flash/
+RAM/
+
+# ARM 编译、汇编和链接产物
+*.o
+*.obj
+*.d
+*.d_raw
+*.dep
+*.map
+*.out
+*.elf
+*.axf
+*.hex
+*.bin
+*.lst
+*.su
+
+# CCS/SysConfig 构建日志
+*.log
+
+# 注意：不要全局忽略 *.cmd、*.mk 或 ti_msp_dl_config.*
+# 根目录中若存在手写链接脚本或构建文件，应当由 Git 跟踪；
+# 当前 SysConfig 生成文件位于 Debug/ 中，已经随目录一起忽略。
+
+# CCS 工作空间级缓存，不属于可移植的工程源码
+.metadata/
+
+# 临时、备份和编辑器交换文件
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.swp
+*.swo
+*~
+
+# Windows / macOS 文件管理器生成文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Visual Studio Code 本机配置（如需团队共享可删除此规则）
+.vscode/
+
+# 本工程本地测试或临时输出目录
+tmp/
+output/

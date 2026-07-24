@@ -1,0 +1,203 @@
+/**
+ * MSPM0G3507 project pin/peripheral configuration (v0.2.0 - 双电机版)
+ *
+ * SysConfig 统一管理两路电机：
+ *   M1 = TIMG7, PA26/PA27
+ *   M2 = TIMG8, PB15/PB16
+ * 避免第二路手写寄存器初始化与 SDK/SysConfig 生成配置不一致。
+ * 两路编码器 (PB0-PB3) 由 SysConfig 配置成双边沿 GPIO 中断输入，
+ * 避免主循环轮询速度不稳定时漏计高速脉冲。
+ *
+ * @cliArgs --device "MSPM0G350X" --part "Default" --package "LQFP-64(PM)" --product "mspm0_sdk@2.11.00.07"
+ * @v2CliArgs --device "MSPM0G3507" --package "LQFP-64(PM)" --product "mspm0_sdk@2.11.00.07"
+ * @versions {"tool":"1.26.2+4477"}
+ */
+
+const GPIO       = scripting.addModule("/ti/driverlib/GPIO", {}, false);
+const BUZZER     = GPIO.addInstance();
+const SPEED_KEY  = GPIO.addInstance();
+const LCD        = GPIO.addInstance();
+const ENCODER_IO = GPIO.addInstance();
+const UART       = scripting.addModule("/ti/driverlib/UART", {}, false);
+const HOST_UART  = UART.addInstance();
+const WT61_UART  = UART.addInstance();
+const PWM        = scripting.addModule("/ti/driverlib/PWM", {}, false);
+const MOTOR_M1_PWM = PWM.addInstance();
+const MOTOR_M2_PWM = PWM.addInstance();
+const SYSCTL     = scripting.addModule("/ti/driverlib/SYSCTL");
+const Board      = scripting.addModule("/ti/driverlib/Board", {}, false);
+
+/* Optional buzzer already present on the core board. */
+BUZZER.port                                  = "PORTA";
+BUZZER.$name                                 = "BUZZER";
+BUZZER.associatedPins[0].assignedPin         = "7";
+BUZZER.associatedPins[0].assignedPortSegment = "Lower";
+BUZZER.associatedPins[0].$name               = "PIN";
+
+/*
+ * 天猛星核心板板载按键 = PB21，低电平按下。
+ * 本工程不使用扩展板 KEY1/PB12 作为速度按键。
+ * 注意：扩展板原理图把 PB21 同时引出为 IMU_CS_A；使用板载按键时，
+ * 不得让外接 IMU 在该网络上主动驱动电平。
+ * 使用内部上拉并由主循环软件消抖，避免人机按键中断干扰编码器 GROUP1 ISR。
+ */
+SPEED_KEY.port = "PORTB";
+SPEED_KEY.$name = "SPEED_KEY";
+SPEED_KEY.associatedPins[0].$name = "BUTTON";
+SPEED_KEY.associatedPins[0].direction = "INPUT";
+SPEED_KEY.associatedPins[0].internalResistor = "PULL_UP";
+SPEED_KEY.associatedPins[0].assignedPin = "21";
+
+/* ST7735, software SPI. These are the user's confirmed board connections. */
+LCD.port = "PORTB";
+LCD.$name = "LCD";
+LCD.associatedPins.create(6);
+LCD.associatedPins[0].$name = "SCLK";
+LCD.associatedPins[0].assignedPin = "9";
+LCD.associatedPins[1].$name = "MOSI";
+LCD.associatedPins[1].assignedPin = "8";
+LCD.associatedPins[2].$name = "CS";
+LCD.associatedPins[2].initialValue = "SET";
+LCD.associatedPins[2].assignedPin = "14";
+LCD.associatedPins[3].$name = "DC";
+LCD.associatedPins[3].initialValue = "SET";
+LCD.associatedPins[3].assignedPin = "11";
+LCD.associatedPins[4].$name = "RST";
+LCD.associatedPins[4].initialValue = "SET";
+LCD.associatedPins[4].assignedPin = "10";
+LCD.associatedPins[5].$name = "BL";
+LCD.associatedPins[5].initialValue = "SET";
+LCD.associatedPins[5].assignedPin = "26";
+
+/*
+ * N20 双路正交编码器。
+ *
+ * A、B 两相都在上升沿和下降沿触发中断，因此软件解码为 x4 倍频。
+ * 驱动只在 GROUP1_IRQHandler 中读取一次 GPIOB 快照和更新计数；
+ * RPM 计算、VOFA 发送等耗时工作仍放在主循环。
+ */
+ENCODER_IO.port = "PORTB";
+ENCODER_IO.$name = "ENCODER_IO";
+ENCODER_IO.associatedPins.create(4);
+ENCODER_IO.associatedPins[0].$name = "ENC_M1_A";
+ENCODER_IO.associatedPins[0].direction = "INPUT";
+ENCODER_IO.associatedPins[0].interruptEn = true;
+ENCODER_IO.associatedPins[0].polarity = "RISE_FALL";
+ENCODER_IO.associatedPins[0].assignedPin = "0";
+ENCODER_IO.associatedPins[1].$name = "ENC_M1_B";
+ENCODER_IO.associatedPins[1].direction = "INPUT";
+ENCODER_IO.associatedPins[1].interruptEn = true;
+ENCODER_IO.associatedPins[1].polarity = "RISE_FALL";
+ENCODER_IO.associatedPins[1].assignedPin = "1";
+ENCODER_IO.associatedPins[2].$name = "ENC_M2_A";
+ENCODER_IO.associatedPins[2].direction = "INPUT";
+ENCODER_IO.associatedPins[2].interruptEn = true;
+ENCODER_IO.associatedPins[2].polarity = "RISE_FALL";
+ENCODER_IO.associatedPins[2].assignedPin = "2";
+ENCODER_IO.associatedPins[3].$name = "ENC_M2_B";
+ENCODER_IO.associatedPins[3].direction = "INPUT";
+ENCODER_IO.associatedPins[3].interruptEn = true;
+ENCODER_IO.associatedPins[3].polarity = "RISE_FALL";
+ENCODER_IO.associatedPins[3].assignedPin = "3";
+
+/*
+ * 板载 CH343 / Type-C：UART0，921600-8-N-1。
+ * VOFA 发送使用 DMA_CH0，DMA 完成时每帧只产生一次中断。
+ */
+HOST_UART.$name = "HOST_UART";
+HOST_UART.profile = "CONFIG_PROFILE_1";
+HOST_UART.enableInternalLoopback = false;
+HOST_UART.targetBaudRate = 921600;
+HOST_UART.enableFIFO = true;
+HOST_UART.txFifoThreshold = "DL_UART_TX_FIFO_LEVEL_ONE_ENTRY";
+HOST_UART.enabledInterrupts = ["DMA_DONE_TX"];
+HOST_UART.enabledDMATXTriggers = "DL_UART_DMA_INTERRUPT_TX";
+HOST_UART.enableDMATX = true;
+HOST_UART.peripheral.$assign = "UART0";
+HOST_UART.peripheral.txPin.$assign = "PA10";
+HOST_UART.peripheral.rxPin.$assign = "PA11";
+HOST_UART.DMA_CHANNEL_TX.peripheral.$assign = "DMA_CH0";
+HOST_UART.DMA_CHANNEL_TX.addressMode = "b2f";
+HOST_UART.DMA_CHANNEL_TX.srcIncDec = "INCREMENT";
+HOST_UART.DMA_CHANNEL_TX.dstLength = "BYTE";
+HOST_UART.DMA_CHANNEL_TX.srcLength = "BYTE";
+
+/*
+ * WT61TTL：UART1，实物已通过上位机配置为 115200-8-N-1，
+ * PA8(TX) / PA9(RX)。
+ * 接收使用 DMA_CH1，每收到一个11字节标准帧才进入一次中断。
+ *
+ * PA8/PA9 和 PB6/PB7 都属于 UART1，不能同时连接原蓝牙 UART1；
+ * 当前配置以 WT61TTL 为准。
+ */
+WT61_UART.$name = "WT61_UART";
+WT61_UART.profile = "CONFIG_PROFILE_1";
+WT61_UART.enableInternalLoopback = false;
+WT61_UART.targetBaudRate = 115200;
+WT61_UART.enableFIFO = true;
+WT61_UART.rxFifoThreshold = "DL_UART_RX_FIFO_LEVEL_ONE_ENTRY";
+WT61_UART.enabledInterrupts = ["DMA_DONE_RX"];
+WT61_UART.enabledDMARXTriggers = "DL_UART_DMA_INTERRUPT_RX";
+WT61_UART.enableDMARX = true;
+WT61_UART.peripheral.$assign = "UART1";
+WT61_UART.peripheral.txPin.$assign = "PA8";
+WT61_UART.peripheral.rxPin.$assign = "PA9";
+WT61_UART.DMA_CHANNEL_RX.peripheral.$assign = "DMA_CH1";
+WT61_UART.DMA_CHANNEL_RX.addressMode = "f2b";
+WT61_UART.DMA_CHANNEL_RX.dstIncDec = "INCREMENT";
+WT61_UART.DMA_CHANNEL_RX.dstLength = "BYTE";
+WT61_UART.DMA_CHANNEL_RX.srcLength = "BYTE";
+
+/*
+ * M1 DRV8871 IN1/IN2: TIMG7 CCP0/CCP1 at 20 kHz
+ * 严格按照立创天猛星 wiki 手册：PA26, PA27
+ * CPUCLK = 32 MHz, timerCount = 32 MHz / 20 kHz = 1600.
+ *
+ * M2 DRV8871 BIN1/BIN2: TIMG8 CCP0/CCP1 at 20 kHz
+ * 原理图网络为 PB15 / PB16。
+ */
+MOTOR_M1_PWM.$name = "MOTOR_M1_PWM";
+MOTOR_M1_PWM.timerCount = 1600;
+MOTOR_M1_PWM.peripheral.$assign = "TIMG7";
+MOTOR_M1_PWM.peripheral.ccp0Pin.$assign = "PA26";
+MOTOR_M1_PWM.peripheral.ccp1Pin.$assign = "PA27";
+MOTOR_M1_PWM.PWM_CHANNEL_0.$name = "MOTOR_M1_IN1";
+MOTOR_M1_PWM.PWM_CHANNEL_0.dutyCycle = 0;
+MOTOR_M1_PWM.PWM_CHANNEL_1.$name = "MOTOR_M1_IN2";
+MOTOR_M1_PWM.PWM_CHANNEL_1.dutyCycle = 0;
+
+MOTOR_M2_PWM.$name = "MOTOR_M2_PWM";
+MOTOR_M2_PWM.timerCount = 1600;
+MOTOR_M2_PWM.peripheral.$assign = "TIMG8";
+MOTOR_M2_PWM.peripheral.ccp0Pin.$assign = "PB15";
+MOTOR_M2_PWM.peripheral.ccp1Pin.$assign = "PB16";
+MOTOR_M2_PWM.PWM_CHANNEL_0.$name = "MOTOR_M2_IN1";
+MOTOR_M2_PWM.PWM_CHANNEL_0.dutyCycle = 0;
+MOTOR_M2_PWM.PWM_CHANNEL_1.$name = "MOTOR_M2_IN2";
+MOTOR_M2_PWM.PWM_CHANNEL_1.dutyCycle = 0;
+
+SYSCTL.forceDefaultClkConfig = true;
+SYSCTL.clockTreeEn = true;
+
+/* Lock the chosen solution so future SysConfig versions do not move pins. */
+BUZZER.associatedPins[0].pin.$suggestSolution = "PA7";
+SPEED_KEY.associatedPins[0].pin.$suggestSolution = "PB21";
+LCD.associatedPins[0].pin.$suggestSolution = "PB9";
+LCD.associatedPins[1].pin.$suggestSolution = "PB8";
+LCD.associatedPins[2].pin.$suggestSolution = "PB14";
+LCD.associatedPins[3].pin.$suggestSolution = "PB11";
+LCD.associatedPins[4].pin.$suggestSolution = "PB10";
+LCD.associatedPins[5].pin.$suggestSolution = "PB26";
+ENCODER_IO.associatedPins[0].pin.$suggestSolution = "PB0";
+ENCODER_IO.associatedPins[1].pin.$suggestSolution = "PB1";
+ENCODER_IO.associatedPins[2].pin.$suggestSolution = "PB2";
+ENCODER_IO.associatedPins[3].pin.$suggestSolution = "PB3";
+WT61_UART.peripheral.txPin.$suggestSolution = "PA8";
+WT61_UART.peripheral.rxPin.$suggestSolution = "PA9";
+MOTOR_M1_PWM.peripheral.ccp0Pin.$suggestSolution = "PA26";
+MOTOR_M1_PWM.peripheral.ccp1Pin.$suggestSolution = "PA27";
+MOTOR_M2_PWM.peripheral.ccp0Pin.$suggestSolution = "PB15";
+MOTOR_M2_PWM.peripheral.ccp1Pin.$suggestSolution = "PB16";
+Board.peripheral.$suggestSolution = "DEBUGSS";
+Board.peripheral.swclkPin.$suggestSolution = "PA20";
+Board.peripheral.swdioPin.$suggestSolution = "PA19";
