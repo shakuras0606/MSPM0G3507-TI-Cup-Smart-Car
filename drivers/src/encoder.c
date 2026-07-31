@@ -5,7 +5,7 @@
  * 设计要点：
  *   1. PB0-PB3 的方向、边沿和中断由 empty.syscfg 统一配置；
  *   2. GROUP1_IRQHandler 只读取 GPIO、查表并累计计数；
- *   3. SysTick ISR 每 10 ms 准时保存一次累计计数（只做快照）；
+ *   3. SysTick ISR 按CONFIG_TASK_ENCODER_CAPTURE_HZ保存累计计数快照；
  *   4. RPM 除法和诊断输出全部留在主循环；
  *   5. RPM 按窗口真实时间和电机到车轮减速比计算。
  */
@@ -32,12 +32,11 @@
     (ENCODER_IO_ENC_M2_A_PIN | ENCODER_IO_ENC_M2_B_PIN)
 
 /**
- * 滑动窗口需要保存“窗口长度 / 更新周期 + 1”个端点。
- * 100 ms 窗口、10 ms 更新周期对应 11 个计数/时间快照。
+ * 滑动窗口需要保存“窗口时长 × 快照频率 + 1”个端点。
  */
 #define ENCODER_SPEED_HISTORY_LENGTH \
-    ((CONFIG_ENCODER_MEASUREMENT_WINDOW_MS / \
-      CONFIG_ENCODER_UPDATE_PERIOD_MS) + 1u)
+    (((CONFIG_ENCODER_MEASUREMENT_WINDOW_MS * \
+       CONFIG_TASK_ENCODER_CAPTURE_HZ) / CONFIG_SCHEDULER_TICK_HZ) + 1u)
 
 /** 滑动测速窗口中的一个累计计数快照。 */
 typedef struct
@@ -209,8 +208,8 @@ static void leave_critical(uint32_t previous_primask)
 /**
  * @brief 以当前计数和时间重新建立一路测速历史。
  *
- * 滑动窗口在收集满 100 ms 数据前保持 RPM 为 0，避免启动阶段使用
- * 10 ms 短窗口产生很大的量化跳变。
+ * 滑动窗口在收集满CONFIG_ENCODER_MEASUREMENT_WINDOW_MS数据前保持RPM为0，
+ * 避免启动阶段使用单次短窗口产生很大的量化跳变。
  */
 static void reset_speed_history(EncoderData *encoder, uint32_t now)
 {
@@ -261,13 +260,13 @@ void Encoder_Tick1msFromIsr(uint32_t now_ms)
 
     if (!g_encoder_initialized ||
         ((uint32_t)(now_ms - g_last_capture_ms) <
-         CONFIG_ENCODER_UPDATE_PERIOD_MS)) {
+         CONFIG_TICKS_FROM_HZ(CONFIG_TASK_ENCODER_CAPTURE_HZ))) {
         return;
     }
 
     /*
      * 只前进一步，而不是追赶多个历史点：SysTick 本身每 1 ms 调用，
-     * 除非全局中断被错误地关闭超过 10 ms，否则不会漏采。
+     * 除非全局中断被错误地关闭超过一个快照周期，否则不会漏采。
      */
     g_last_capture_ms = now_ms;
     for (index = 0u; index < ENCODER_COUNT; ++index) {

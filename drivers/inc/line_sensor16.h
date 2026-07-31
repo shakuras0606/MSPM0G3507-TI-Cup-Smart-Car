@@ -1,23 +1,16 @@
 /**
  * @file    line_sensor16.h
- * @brief   16 通道线传感器数据处理 API
+ * @brief   Hiwonder 8 路红外巡线模块 UART/DMA 驱动兼容接口
  *
- * 处理 16 通道线阵传感器的数据，支持数字量（二值化）和模拟量（灰度值）输入。
- * 核心计算：加权质心法 (weighted centroid) 确定黑线在传感器阵列中的位置。
+ * 文件名与 LineSensor16_* API 暂时保留，是为了让已经调好的巡线位置环、
+ * Yaw 环和速度环不需要改动。实际物理通道只有 S1~S8：
+ *   - UART2：PA21(TX) / PA22(RX)，115200-8-N-1
+ *   - UART 手动通信模式：只发送命令 2 读取 8 路 16 位原始模拟量
+ *   - MSPM0 使用 project_config.h 中的阈值自行生成二值状态
+ *   - bit0=S1，bit7=S8；S1 默认作为最左通道
  *
- * 数据来源：
- *   - 数字量模式：外部传感器模块输出 16 位二值化掩码
- *   - 模拟量模式：外部 ADC 或传感器模块输出 16 通道 16 位灰度值
- *
- * 位置计算（加权质心法）：
- *   position = sum(channel_pos[i] * value[i]) / sum(value[i])
- *   其中 channel_pos[i] 在 -1000..+1000 范围内线性分布
- *
- * 诊断功能：
- *   - 统计活跃通道数 (active_count)
- *   - 记录峰值通道强度 (peak_strength)
- *   - 生成诊断掩码（强度 >= 峰值/2 的通道）
- *   - 线丢失检测 (line_lost)
+ * values[] 仍保留 16 项以兼容现有屏幕函数；只有 values[0..7] 有效，
+ * values[8..15] 始终为 0。
  */
 
 #ifndef LINE_SENSOR16_H_
@@ -26,68 +19,60 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/** 线传感器通道数：16 */
-#define LINE_SENSOR16_CHANNEL_COUNT (16u)
+/** 兼容现有上层数组尺寸。 */
+#define LINE_SENSOR16_CHANNEL_COUNT       (16u)
 
-/** 线传感器数据来源枚举 */
+/** 新模块实际物理通道数。 */
+#define LINE_SENSOR_PHYSICAL_CHANNEL_COUNT (8u)
+
 typedef enum
 {
-    LINE_SENSOR16_SOURCE_NONE = 0,  /**< 未收到数据 */
-
-    LINE_SENSOR16_SOURCE_DIGITAL,   /**< 数字量输入（二值化掩码） */
-
-    LINE_SENSOR16_SOURCE_ANALOG     /**< 模拟量输入（灰度值） */
+    LINE_SENSOR16_SOURCE_NONE = 0,
+    LINE_SENSOR16_SOURCE_DIGITAL,
+    LINE_SENSOR16_SOURCE_ANALOG,
+    LINE_SENSOR16_SOURCE_UART
 } LineSensor16Source;
 
-/** 线传感器完整数据集 */
 typedef struct
 {
-    uint16_t raw_mask;                              /**< 原始数字掩码 / 模拟量诊断掩码 */
-
-    uint16_t values[LINE_SENSOR16_CHANNEL_COUNT];   /**< 各通道强度值（0=无信号, 65535=饱和） */
-
-    int16_t position;                               /**< 加权质心位置 (-1000=最左, +1000=最右) */
-
-    uint16_t total_strength;                        /**< 所有通道强度之和 */
-
-    uint16_t peak_strength;                         /**< 最强通道的强度值 */
-
-    uint8_t active_count;                           /**< 活跃通道计数（数字模式）或 >= 阈值通道数（模拟模式） */
-
-    bool line_lost;                                 /**< true = 无任何通道检测到信号 */
-
-    LineSensor16Source source;                      /**< 数据来源类型 */
+    uint16_t raw_mask;    /**< MSPM0 对模拟量阈值化后的低 8 位；bit0=S1。 */
+    uint16_t active_mask; /**< 与 raw_mask 相同：1 表示该通道判定为黑线。 */
+    uint16_t values[LINE_SENSOR16_CHANNEL_COUNT]; /**< S1~S8 模拟值；后 8 项为 0。 */
+    int16_t position;     /**< 8 路有效通道的加权质心。 */
+    uint16_t total_strength;
+    uint16_t peak_strength;
+    uint8_t active_count; /**< 当前判为黑线的物理通道数，范围 0..8。 */
+    bool line_lost;
+    bool online;          /**< 最近一次状态字节未超过串口离线时间。 */
+    uint32_t last_update_ms;
+    uint32_t state_frames;  /**< MSPM0 已完成阈值化的位置样本数。 */
+    uint32_t analog_frames; /**< 校验通过的 UART 模拟量帧数。 */
+    uint32_t protocol_errors;
+    uint32_t rx_overflows;
+    LineSensor16Source source;
 } LineSensor16Data;
 
 /**
- * @brief 初始化线传感器数据结构
- *
- * 将所有字段清零，设置 line_lost = true，source = NONE
+ * 初始化 UART2 RX/TX DMA，并发送 UART“手动通信模式”配置字节。
+ * 这里的“手动”仅表示由主控发命令读取，不是模块的灰度学习模式。
  */
 void LineSensor16_Init(void);
 
 /**
- * @brief 使用数字量（二值化掩码）更新线传感器数据
- * @param raw_mask   16 位二值化掩码（bit[0]=通道 0）
- * @param active_low true 表示掩码中 0 为有效（低电平有效），false 表示 1 为有效
+ * @brief 非阻塞处理 UART 数据并按设定频率发起下一次读取。
  *
- * 计算加权质心位置，无有效通道时 line_lost 置为 true
+ * 保留 Scan 名称以兼容 app.c。函数不再扫描旧 16 路模拟复用器。
  */
+void LineSensor16_Scan(void);
+
+/** 使用低 8 位二值掩码更新位置；保留给单元测试和兼容调用。 */
 void LineSensor16_UpdateDigital(uint16_t raw_mask, bool active_low);
 
-/**
- * @brief 使用模拟量（灰度值）更新线传感器数据
- * @param values 16 个通道的灰度值数组（0=最暗, 65535=最亮）
- *
- * 使用全精度加权质心法计算位置，同时生成诊断掩码（强度 >= 峰值/2）
- */
+/** 使用 values[0..7] 更新模拟质心；上层正常巡线不调用此接口。 */
 void LineSensor16_UpdateAnalog(
     const uint16_t values[LINE_SENSOR16_CHANNEL_COUNT]);
 
-/**
- * @brief 获取最新的线传感器数据（只读）
- * @return 指向内部数据结构的常量指针
- */
+/** 获取最新只读快照。 */
 const LineSensor16Data *LineSensor16_GetData(void);
 
 #endif /* LINE_SENSOR16_H_ */

@@ -10,11 +10,12 @@
  *   - 四种屏幕旋转方向
  *   - 内置 5x7 像素 ASCII 字体（空格、数字、大写字母、'-'、'.'、':'）
  *   - 像素缩放（整数倍放大）
- *   - 背光开关控制
+ *   - BLK硬接3.3V，软件不再控制背光
  *
  * 颜色格式：RGB565（红 5 位、绿 6 位、蓝 5 位）
  *
- * 引脚：PB8(MOSI), PB9(SCLK), PB10(RST), PB11(DC), PB14(CS), PB26(BLK)
+ * 引脚：PB8(MOSI), PB9(SCLK), PB10(RST), PB11(DC), PB14(CS)
+ *       BLK直接接3.3V；PB26专用于巡线模块S2。
  */
 
 #ifndef ST7735_H_
@@ -82,8 +83,8 @@ uint16_t ST7735_GetWidth(void);
 uint16_t ST7735_GetHeight(void);
 
 /**
- * @brief 背光开关控制
- * @param on true 开启背光, false 关闭背光
+ * @brief 兼容旧代码的背光接口；BLK硬接3.3V，因此本函数不执行GPIO操作。
+ * @param on 参数被忽略。
  */
 void ST7735_Backlight(bool on);
 

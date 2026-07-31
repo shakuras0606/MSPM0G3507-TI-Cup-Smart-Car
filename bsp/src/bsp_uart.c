@@ -2,8 +2,8 @@
  * @file    bsp_uart.c
  * @brief   UART0 上位机 TX DMA 实现
  *
- * UART 外设以 921600-8-N-1 工作。每次提交先复制到内部缓冲区，然后由
- * DMA_CH0 把字节搬运到 UART0 TXDATA；CPU 不再逐字节轮询 TX FIFO。
+ * UART0的波特率、校验和停止位由project_config.h统一配置。每次提交先
+ * 复制到内部缓冲区，再由DMA_CH0搬运到UART0 TXDATA。
  */
 
 #include "bsp_uart.h"
@@ -13,8 +13,22 @@
 #include "project_config.h"
 #include "ti_msp_dl_config.h"
 
-/** DMA 传输期间必须保持不变的内部发送缓冲区。 */
-static uint8_t g_host_tx_buffer[CONFIG_HOST_UART_TX_DMA_BUFFER_SIZE];
+#if (CONFIG_VOFA_UART_PARITY == 0u)
+#define VOFA_UART_PARITY_MODE DL_UART_MAIN_PARITY_NONE
+#elif (CONFIG_VOFA_UART_PARITY == 1u)
+#define VOFA_UART_PARITY_MODE DL_UART_MAIN_PARITY_EVEN
+#else
+#define VOFA_UART_PARITY_MODE DL_UART_MAIN_PARITY_ODD
+#endif
+
+#if (CONFIG_VOFA_UART_STOP_BITS == 1u)
+#define VOFA_UART_STOP_BITS_MODE DL_UART_MAIN_STOP_BITS_ONE
+#else
+#define VOFA_UART_STOP_BITS_MODE DL_UART_MAIN_STOP_BITS_TWO
+#endif
+
+/** DMA传输期间必须保持不变的内部发送缓冲区。 */
+static uint8_t g_host_tx_buffer[CONFIG_VOFA_UART_TX_DMA_BUFFER_SIZE];
 
 /** true 表示 DMA_CH0 正在使用 g_host_tx_buffer。 */
 static volatile bool g_host_tx_busy;
@@ -22,6 +36,23 @@ static volatile bool g_host_tx_busy;
 void BSP_Uart_Init(void)
 {
     g_host_tx_busy = false;
+
+    /*
+     * SysConfig负责UART0时钟、PA10/PA11复用、FIFO、中断和DMA事件。
+     * 此处在第一次发送前重新应用应用层配置，使project_config.h成为
+     * VOFA波特率和帧格式的实际生效入口，而不只是说明文字。
+     */
+    DL_UART_Main_disable(HOST_UART_INST);
+    DL_UART_Main_configBaudRate(
+        HOST_UART_INST,
+        HOST_UART_INST_FREQUENCY,
+        CONFIG_VOFA_UART_BAUD_RATE);
+    DL_UART_Main_setWordLength(
+        HOST_UART_INST, DL_UART_MAIN_WORD_LENGTH_8_BITS);
+    DL_UART_Main_setParityMode(HOST_UART_INST, VOFA_UART_PARITY_MODE);
+    DL_UART_Main_setStopBits(HOST_UART_INST, VOFA_UART_STOP_BITS_MODE);
+    DL_UART_Main_enable(HOST_UART_INST);
+
     NVIC_ClearPendingIRQ(HOST_UART_INST_INT_IRQN);
     NVIC_EnableIRQ(HOST_UART_INST_INT_IRQN);
 }

@@ -42,6 +42,9 @@ static bool is_valid_config(const PidConfig *config)
     if (config->integral_min > config->integral_max) {
         return false;
     }
+    if (config->integral_separation_threshold < 0.0f) {
+        return false;
+    }
     if (config->derivative_filter_tau_s < 0.0f) {
         return false;
     }
@@ -100,6 +103,7 @@ void Pid_Reset(PidController *controller, float initial_measurement)
     }
 
     controller->terms.error = 0.0f;
+    controller->terms.feedforward = 0.0f;
     controller->terms.proportional = 0.0f;
     controller->terms.integral = 0.0f;
     controller->terms.derivative = 0.0f;
@@ -108,6 +112,7 @@ void Pid_Reset(PidController *controller, float initial_measurement)
         controller->config.output_min,
         controller->config.output_max);
     controller->terms.saturated = false;
+    controller->terms.integral_separated = false;
 
     controller->previous_error = 0.0f;
     controller->previous_measurement = initial_measurement;
@@ -117,11 +122,15 @@ void Pid_Reset(PidController *controller, float initial_measurement)
 }
 
 /**
- * 执行一次完整离散PID。所有运算使用调用者提供的真实dt_s，任务延迟时
- * 积分量和变化率仍按真实经过时间计算。
+ * 执行一次带前馈的完整离散PID。所有运算使用调用者提供的真实dt_s，
+ * 任务延迟时积分量和变化率仍按真实经过时间计算。
+ *
+ * feedforward由调用者根据对象模型生成。它不进入积分状态，但必须参与
+ * 总输出限幅和抗积分饱和判断；这正是本接口相对“返回后再加前馈”的优势。
  */
-float Pid_Update(PidController *controller, float setpoint,
-                 float measurement, float dt_s)
+float Pid_UpdateWithFeedforward(PidController *controller, float setpoint,
+                                float measurement, float feedforward,
+                                float dt_s)
 {
     float error;
     float raw_derivative;
@@ -129,6 +138,8 @@ float Pid_Update(PidController *controller, float setpoint,
     float candidate_integral;
     float unclamped_output;
     float output;
+    float absolute_error;
+    bool integral_update_allowed;
     bool pushes_further_into_saturation;
 
     if ((controller == NULL) || (dt_s <= 0.0f)) {
@@ -167,11 +178,32 @@ float Pid_Update(PidController *controller, float setpoint,
         controller->derivative_state = raw_derivative;
     }
 
+    /* 保存前馈，供VOFA和调试器直接观察模型给出的基础驱动力。 */
+    controller->terms.feedforward = feedforward;
+
     /* P项只取决于本周期误差，不包含任何历史。 */
     controller->terms.error = error;
     controller->terms.proportional = controller->config.kp * error;
     controller->terms.derivative =
         controller->config.kd * controller->derivative_state;
+
+    /*
+     * 积分分离：
+     *   - 阈值为0：与旧版本完全相同，始终允许候选积分；
+     *   - 小误差：正常积分，消除稳态偏差；
+     *   - 大误差且会继续把现有积分推向同方向：冻结积分；
+     *   - 大误差与已有积分方向相反：仍允许积分卸载。
+     *
+     * 最后一条很重要：堵转松手后若产生负误差，控制器仍能快速清除已有
+     * 正积分，而不是把它永久冻结到误差重新进入小范围。
+     */
+    absolute_error = (error >= 0.0f) ? error : -error;
+    integral_update_allowed =
+        (controller->config.integral_separation_threshold <= 0.0f) ||
+        (absolute_error <
+         controller->config.integral_separation_threshold) ||
+        ((error * controller->integral_state) < 0.0f);
+    controller->terms.integral_separated = !integral_update_allowed;
 
     /*
      * integral_state 直接保存“积分输出”，而不是单纯的误差积分。
@@ -181,14 +213,17 @@ float Pid_Update(PidController *controller, float setpoint,
      * 先计算候选积分而不是立即提交。后面若发现它会把饱和推得更深，
      * 可以丢弃本次增量，实现条件积分抗饱和。
      */
-    candidate_integral = controller->integral_state +
-        controller->config.ki * error * dt_s;
+    candidate_integral = controller->integral_state;
+    if (integral_update_allowed) {
+        candidate_integral += controller->config.ki * error * dt_s;
+    }
     candidate_integral = clamp_float(
         candidate_integral,
         controller->config.integral_min,
         controller->config.integral_max);
 
     unclamped_output =
+        controller->terms.feedforward +
         controller->terms.proportional +
         candidate_integral +
         controller->terms.derivative;
@@ -205,13 +240,14 @@ float Pid_Update(PidController *controller, float setpoint,
         ((unclamped_output < controller->config.output_min) &&
          (error < 0.0f));
 
-    if (!pushes_further_into_saturation) {
+    if (integral_update_allowed && !pushes_further_into_saturation) {
         controller->integral_state = candidate_integral;
     }
 
     /* 使用最终获准的积分状态重新计算并限幅输出。 */
     controller->terms.integral = controller->integral_state;
     unclamped_output =
+        controller->terms.feedforward +
         controller->terms.proportional +
         controller->terms.integral +
         controller->terms.derivative;
@@ -226,6 +262,17 @@ float Pid_Update(PidController *controller, float setpoint,
     controller->previous_error = error;
     controller->previous_measurement = measurement;
     return output;
+}
+
+/**
+ * 保持通用PID原接口：没有对象模型的调用者默认前馈为0。
+ * 巡线位置环、角速度环等可以继续使用本函数，无需了解速度前馈。
+ */
+float Pid_Update(PidController *controller, float setpoint,
+                 float measurement, float dt_s)
+{
+    return Pid_UpdateWithFeedforward(
+        controller, setpoint, measurement, 0.0f, dt_s);
 }
 
 /** 复制调试分项，不暴露可写的内部状态指针。 */

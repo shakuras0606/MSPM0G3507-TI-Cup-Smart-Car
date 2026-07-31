@@ -61,7 +61,7 @@ steering_rpm = yaw_rate_pid(target_yaw_rate, gyro_z_dps)
 建议频率 200～500 Hz。若陀螺仪当前只以 100 Hz 提供新数据，就先将该环
 也运行在 100 Hz，不要对重复数据假装进行 500 Hz 控制。
 
-### 2.3 左右车轮速度环
+### 2.3 左右车轮速度前馈 + PI反馈环
 
 基础车速和差速量合成为左右轮目标：
 
@@ -70,20 +70,25 @@ left_target_rpm  = base_rpm - steering_rpm
 right_target_rpm = base_rpm + steering_rpm
 ```
 
-再由两个完全独立的 PI/PID 控制器输出电机千分比命令：
+再由两个完全独立的“目标RPM前馈 + PI反馈”控制器输出电机千分比命令：
 
 ```text
-left_pwm  = left_speed_pid(left_target_rpm,  left_wheel_rpm)
-right_pwm = right_speed_pid(right_target_rpm, right_wheel_rpm)
+left_pwm  = left_feedforward(left_target_rpm)
+            + left_speed_pi(left_target_rpm, left_wheel_rpm)
+right_pwm = right_feedforward(right_target_rpm)
+            + right_speed_pi(right_target_rpm, right_wheel_rpm)
 ```
 
 车轮 RPM 每 10 ms 更新，因此速度环运行 100 Hz。速度环通常先使用 PI：
 
+- 前馈根据目标RPM立即给出大部分基础驱动力，改善档位切换响应；
 - P 提供速度误差响应；
-- I 消除负载下的静差；
+- I 只修正前馈模型误差和负载静差；
 - D 对量化后的编码器速度很敏感，初期设为 0。
 
 左右轮必须使用两个 `PidController` 实例，不能共享积分和历史状态。
+前馈必须在PID内部参与总输出限幅和抗积分饱和，不能在限幅后的PID输出上
+再次盲目相加。
 
 ## 3. 弯道降速
 
@@ -118,7 +123,7 @@ base_rpm = straight_rpm
 1. 关闭巡线环和陀螺仪环，只调左右车轮速度 PI；
 2. 固定较低基础 RPM，调陀螺仪角速度 PI；
 3. 最后调巡线位置 PD；
-4. 稳定后再增加少量积分、弯道降速和速度前馈；
+4. 稳定后再增加少量积分和弯道降速；速度前馈应先用定速数据标定；
 5. 通过 VOFA 同时观察目标值、测量值、PID 输出及饱和标志。
 
 外环带宽必须低于内环。经验上，位置环响应速度应明显慢于角速度环，

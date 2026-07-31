@@ -11,12 +11,25 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef enum
+{
+    SCREEN_RACE_WAIT = 0,
+    SCREEN_RACE_RUN = 1,
+    SCREEN_RACE_BRAKE = 2,
+    SCREEN_RACE_DONE = 3,
+    SCREEN_RACE_FAULT = 4
+} ScreenRaceState;
+
 /** 初始化 ST7735 并绘制固定标签。 */
 void ScreenTask_Init(void);
 
-/** 局部刷新 RPM 和姿态数据；建议 200 ms 调用一次。 */
-void ScreenTask_Update(int32_t target_rpm, int32_t rpm_m1, int32_t rpm_m2,
-                       float yaw_deg, float pitch_deg, float roll_deg,
-                       bool wt61_online);
+/** 局部刷新 RPM、姿态、8路原始模拟量和MCU阈值结果。 */
+void ScreenTask_Update(int32_t rpm_m1, int32_t rpm_m2,
+                       float yaw_deg, bool wt61_online,
+                       const uint16_t line_adc_values[16],
+                       uint16_t line_raw_mask,
+                       int16_t line_position, bool line_lost,
+                       uint32_t race_elapsed_ms,
+                       ScreenRaceState race_state);
 
 #endif /* SCREEN_TASK_H_ */

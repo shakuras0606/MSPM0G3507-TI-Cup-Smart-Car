@@ -21,6 +21,7 @@ const ENCODER_IO = GPIO.addInstance();
 const UART       = scripting.addModule("/ti/driverlib/UART", {}, false);
 const HOST_UART  = UART.addInstance();
 const WT61_UART  = UART.addInstance();
+const LINE_UART  = UART.addInstance();
 const PWM        = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const MOTOR_M1_PWM = PWM.addInstance();
 const MOTOR_M2_PWM = PWM.addInstance();
@@ -48,10 +49,10 @@ SPEED_KEY.associatedPins[0].direction = "INPUT";
 SPEED_KEY.associatedPins[0].internalResistor = "PULL_UP";
 SPEED_KEY.associatedPins[0].assignedPin = "21";
 
-/* ST7735, software SPI. These are the user's confirmed board connections. */
+/* ST7735软件SPI；BLK已直接接3.3V，不再占用MCU GPIO。 */
 LCD.port = "PORTB";
 LCD.$name = "LCD";
-LCD.associatedPins.create(6);
+LCD.associatedPins.create(5);
 LCD.associatedPins[0].$name = "SCLK";
 LCD.associatedPins[0].assignedPin = "9";
 LCD.associatedPins[1].$name = "MOSI";
@@ -65,9 +66,6 @@ LCD.associatedPins[3].assignedPin = "11";
 LCD.associatedPins[4].$name = "RST";
 LCD.associatedPins[4].initialValue = "SET";
 LCD.associatedPins[4].assignedPin = "10";
-LCD.associatedPins[5].$name = "BL";
-LCD.associatedPins[5].initialValue = "SET";
-LCD.associatedPins[5].assignedPin = "26";
 
 /*
  * N20 双路正交编码器。
@@ -101,8 +99,9 @@ ENCODER_IO.associatedPins[3].polarity = "RISE_FALL";
 ENCODER_IO.associatedPins[3].assignedPin = "3";
 
 /*
- * 板载 CH343 / Type-C：UART0，921600-8-N-1。
- * VOFA 发送使用 DMA_CH0，DMA 完成时每帧只产生一次中断。
+ * 无线串口/板载CH343：UART0，PA10(TX)/PA11(RX)。
+ * VOFA发送使用DMA_CH0；最终波特率和帧格式由BSP_Uart_Init()按照
+ * project_config.h重新应用。这里的921600是SysConfig生成代码的初始值。
  */
 HOST_UART.$name = "HOST_UART";
 HOST_UART.profile = "CONFIG_PROFILE_1";
@@ -149,6 +148,37 @@ WT61_UART.DMA_CHANNEL_RX.dstLength = "BYTE";
 WT61_UART.DMA_CHANNEL_RX.srcLength = "BYTE";
 
 /*
+ * Hiwonder 8路红外巡线模块：UART2，PA21(TX)/PA22(RX)，115200-8-N-1。
+ * 模块TX接PA22，模块RX接PA21。RX/TX分别使用DMA_CH2/DMA_CH3，
+ * 不改变VOFA的DMA_CH0和WT61的DMA_CH1。
+ */
+LINE_UART.$name = "LINE_UART";
+LINE_UART.profile = "CONFIG_PROFILE_1";
+LINE_UART.enableInternalLoopback = false;
+LINE_UART.targetBaudRate = 115200;
+LINE_UART.enableFIFO = true;
+LINE_UART.rxFifoThreshold = "DL_UART_RX_FIFO_LEVEL_ONE_ENTRY";
+LINE_UART.txFifoThreshold = "DL_UART_TX_FIFO_LEVEL_ONE_ENTRY";
+LINE_UART.enabledInterrupts = ["DMA_DONE_RX", "DMA_DONE_TX"];
+LINE_UART.enabledDMARXTriggers = "DL_UART_DMA_INTERRUPT_RX";
+LINE_UART.enabledDMATXTriggers = "DL_UART_DMA_INTERRUPT_TX";
+LINE_UART.enableDMARX = true;
+LINE_UART.enableDMATX = true;
+LINE_UART.peripheral.$assign = "UART2";
+LINE_UART.peripheral.txPin.$assign = "PA21";
+LINE_UART.peripheral.rxPin.$assign = "PA22";
+LINE_UART.DMA_CHANNEL_RX.peripheral.$assign = "DMA_CH2";
+LINE_UART.DMA_CHANNEL_RX.addressMode = "f2b";
+LINE_UART.DMA_CHANNEL_RX.dstIncDec = "INCREMENT";
+LINE_UART.DMA_CHANNEL_RX.dstLength = "BYTE";
+LINE_UART.DMA_CHANNEL_RX.srcLength = "BYTE";
+LINE_UART.DMA_CHANNEL_TX.peripheral.$assign = "DMA_CH3";
+LINE_UART.DMA_CHANNEL_TX.addressMode = "b2f";
+LINE_UART.DMA_CHANNEL_TX.srcIncDec = "UNCHANGED";
+LINE_UART.DMA_CHANNEL_TX.dstLength = "BYTE";
+LINE_UART.DMA_CHANNEL_TX.srcLength = "BYTE";
+
+/*
  * M1 DRV8871 IN1/IN2: TIMG7 CCP0/CCP1 at 20 kHz
  * 严格按照立创天猛星 wiki 手册：PA26, PA27
  * CPUCLK = 32 MHz, timerCount = 32 MHz / 20 kHz = 1600.
@@ -187,13 +217,14 @@ LCD.associatedPins[1].pin.$suggestSolution = "PB8";
 LCD.associatedPins[2].pin.$suggestSolution = "PB14";
 LCD.associatedPins[3].pin.$suggestSolution = "PB11";
 LCD.associatedPins[4].pin.$suggestSolution = "PB10";
-LCD.associatedPins[5].pin.$suggestSolution = "PB26";
 ENCODER_IO.associatedPins[0].pin.$suggestSolution = "PB0";
 ENCODER_IO.associatedPins[1].pin.$suggestSolution = "PB1";
 ENCODER_IO.associatedPins[2].pin.$suggestSolution = "PB2";
 ENCODER_IO.associatedPins[3].pin.$suggestSolution = "PB3";
 WT61_UART.peripheral.txPin.$suggestSolution = "PA8";
 WT61_UART.peripheral.rxPin.$suggestSolution = "PA9";
+LINE_UART.peripheral.txPin.$suggestSolution = "PA21";
+LINE_UART.peripheral.rxPin.$suggestSolution = "PA22";
 MOTOR_M1_PWM.peripheral.ccp0Pin.$suggestSolution = "PA26";
 MOTOR_M1_PWM.peripheral.ccp1Pin.$suggestSolution = "PA27";
 MOTOR_M2_PWM.peripheral.ccp0Pin.$suggestSolution = "PB15";

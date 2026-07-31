@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 
+#include "project_config.h"
 #include "st7735.h"
 
 #define SCREEN_VALUE_X       (48u)
@@ -80,6 +81,48 @@ static void format_angle(float value, char output[12])
     output[position] = '\0';
 }
 
+/** 从0开始的比赛计时显示为秒.十分之一秒，例如“12.3s”。 */
+static void format_race_time(uint32_t elapsed_ms, char output[12])
+{
+    uint32_t tenths = elapsed_ms / 100u;
+    uint32_t seconds = tenths / 10u;
+    uint8_t position = 0u;
+    char reverse[8];
+    uint8_t count = 0u;
+
+    if (seconds > 9999u) {
+        seconds = 9999u;
+    }
+    do {
+        reverse[count++] = (char)('0' + seconds % 10u);
+        seconds /= 10u;
+    } while ((seconds != 0u) && (count < sizeof(reverse)));
+    while (count != 0u) {
+        output[position++] = reverse[--count];
+    }
+    output[position++] = '.';
+    output[position++] = (char)('0' + tenths % 10u);
+    output[position++] = 's';
+    output[position] = '\0';
+}
+
+static const char *race_state_text(ScreenRaceState state)
+{
+    switch (state) {
+        case SCREEN_RACE_RUN:
+            return "RUN";
+        case SCREEN_RACE_BRAKE:
+            return "BRAKE";
+        case SCREEN_RACE_DONE:
+            return "DONE";
+        case SCREEN_RACE_FAULT:
+            return "FAULT";
+        case SCREEN_RACE_WAIT:
+        default:
+            return "WAIT";
+    }
+}
+
 static void draw_value(uint16_t y, const char *text, uint16_t color)
 {
     ST7735_FillRect(SCREEN_VALUE_X, y, SCREEN_VALUE_W,
@@ -88,49 +131,120 @@ static void draw_value(uint16_t y, const char *text, uint16_t color)
                       ST7735_BLACK, 1u);
 }
 
+/** 转换成固定8字符，屏幕从左到右依次显示S1...S8状态位。 */
+static void format_line_raw_bits(uint16_t raw_mask, char output[9])
+{
+    uint8_t channel;
+
+    for (channel = 0u; channel < 8u; ++channel) {
+        output[channel] =
+            ((raw_mask & ((uint16_t)1u << channel)) != 0u) ? '1' : '0';
+    }
+    output[8] = '\0';
+}
+
+/** 每行显示连续2路16位原始模拟值，固定5位十进制。 */
+static void format_adc_row(const uint16_t values[16], uint8_t first,
+                           char output[12])
+{
+    uint8_t item;
+    uint8_t position = 0u;
+
+    for (item = 0u; item < 2u; ++item) {
+        uint16_t value = values[(uint8_t)(first + item)];
+
+        output[position++] = (char)('0' + (value / 10000u));
+        output[position++] = (char)('0' + ((value / 1000u) % 10u));
+        output[position++] = (char)('0' + ((value / 100u) % 10u));
+        output[position++] = (char)('0' + ((value / 10u) % 10u));
+        output[position++] = (char)('0' + (value % 10u));
+        if (item != 1u) {
+            output[position++] = ' ';
+        }
+    }
+    output[position] = '\0';
+}
+
 void ScreenTask_Init(void)
 {
+    char text[12];
+
     ST7735_Init();
     ST7735_DrawString(4u, 3u, "TI3507 CAR", ST7735_CYAN,
                       ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 12u, "SET:", ST7735_CYAN,
+    ST7735_DrawString(76u, 3u, "WAIT", ST7735_YELLOW,
+                      ST7735_BLACK, 1u);
+    ST7735_DrawString(4u, 12u, "TIME:", ST7735_CYAN,
                       ST7735_BLACK, 1u);
     ST7735_DrawString(4u, 22u, "RPM1:", ST7735_WHITE,
                       ST7735_BLACK, 1u);
     ST7735_DrawString(4u, 40u, "RPM2:", ST7735_WHITE,
                       ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 66u, "YAW:", ST7735_YELLOW,
+    ST7735_DrawString(4u, 58u, "YAW:", ST7735_YELLOW,
                       ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 84u, "PITCH:", ST7735_YELLOW,
+    ST7735_DrawString(0u, 70u, "RAW S1-8 T:", ST7735_CYAN,
+                       ST7735_BLACK, 1u);
+    format_integer(CONFIG_LINE_SENSOR_ADC_THRESHOLD, text);
+    ST7735_DrawString(72u, 70u, text, ST7735_CYAN,
                       ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 102u, "ROLL:", ST7735_YELLOW,
-                      ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 132u, "WT61 WAIT", ST7735_RED,
-                      ST7735_BLACK, 1u);
+    ST7735_DrawString(0u, 122u, "STATE S1->S8", ST7735_CYAN,
+                       ST7735_BLACK, 1u);
+    ST7735_DrawString(4u, 144u, "POS:", ST7735_CYAN,
+                       ST7735_BLACK, 1u);
 }
 
-void ScreenTask_Update(int32_t target_rpm, int32_t rpm_m1, int32_t rpm_m2,
-                       float yaw_deg, float pitch_deg, float roll_deg,
-                       bool wt61_online)
+void ScreenTask_Update(int32_t rpm_m1, int32_t rpm_m2,
+                       float yaw_deg, bool wt61_online,
+                       const uint16_t line_adc_values[16],
+                       uint16_t line_raw_mask,
+                       int16_t line_position, bool line_lost,
+                       uint32_t race_elapsed_ms,
+                       ScreenRaceState race_state)
 {
     char text[12];
+    char raw_bits[9];
+    char adc_row[12];
+    uint8_t row;
 
-    format_integer(target_rpm, text);
+    format_race_time(race_elapsed_ms, text);
     draw_value(12u, text, ST7735_CYAN);
     format_integer(rpm_m1, text);
     draw_value(22u, text, ST7735_GREEN);
     format_integer(rpm_m2, text);
     draw_value(40u, text, ST7735_GREEN);
     format_angle(yaw_deg, text);
-    draw_value(66u, text, ST7735_YELLOW);
-    format_angle(pitch_deg, text);
-    draw_value(84u, text, ST7735_YELLOW);
-    format_angle(roll_deg, text);
-    draw_value(102u, text, ST7735_YELLOW);
+    draw_value(58u, text, ST7735_YELLOW);
 
-    ST7735_FillRect(4u, 132u, 90u, 8u, ST7735_BLACK);
-    ST7735_DrawString(4u, 132u,
-                      wt61_online ? "WT61 OK" : "WT61 WAIT",
-                      wt61_online ? ST7735_GREEN : ST7735_RED,
+    for (row = 0u; row < 4u; ++row) {
+        uint16_t y = (uint16_t)(80u + (uint16_t)row * 10u);
+
+        format_adc_row(line_adc_values, (uint8_t)(row * 2u), adc_row);
+        ST7735_FillRect(0u, y, 114u, SCREEN_VALUE_H, ST7735_BLACK);
+        ST7735_DrawString(0u, y, adc_row,
+                          ST7735_GREEN, ST7735_BLACK, 1u);
+    }
+
+    format_line_raw_bits(line_raw_mask, raw_bits);
+    ST7735_FillRect(0u, 132u, 96u, SCREEN_VALUE_H, ST7735_BLACK);
+    ST7735_DrawString(0u, 132u, raw_bits,
+                      ST7735_WHITE, ST7735_BLACK, 1u);
+
+    ST7735_FillRect(SCREEN_VALUE_X, 144u, SCREEN_VALUE_W,
+                    SCREEN_VALUE_H, ST7735_BLACK);
+    if (line_lost) {
+        ST7735_DrawString(SCREEN_VALUE_X, 144u, "LOST",
+                          ST7735_RED, ST7735_BLACK, 1u);
+    } else {
+        format_integer(line_position, text);
+        ST7735_DrawString(SCREEN_VALUE_X, 144u, text,
+                          ST7735_CYAN, ST7735_BLACK, 1u);
+    }
+
+    ST7735_FillRect(76u, 3u, 52u, SCREEN_VALUE_H, ST7735_BLACK);
+    ST7735_DrawString(76u, 3u, wt61_online ?
+                      race_state_text(race_state) : "IMU!",
+                      wt61_online ?
+                      ((race_state == SCREEN_RACE_FAULT) ?
+                       ST7735_RED : ST7735_GREEN) : ST7735_RED,
                       ST7735_BLACK, 1u);
 }

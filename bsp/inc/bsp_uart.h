@@ -1,9 +1,9 @@
 /**
  * @file    bsp_uart.h
- * @brief   UART0 上位机发送抽象层（CH343 + DMA）
+ * @brief   UART0 VOFA发送抽象层（PA10无线串口/CH343 + DMA）
  *
  * 当前串口分工：
- *   - UART0 PA10/PA11：板载 CH343，上位机/VOFA，当前只启用 TX DMA；
+ *   - UART0 PA10/PA11：无线串口或板载CH343，VOFA使用TX DMA；
  *   - UART1 PA8/PA9：WT61TTL，由 wt61.c 独占并使用 RX DMA。
  *
  * UART1 和原 PB6/PB7 蓝牙脚属于同一个 UART1 外设，不能同时工作。
@@ -24,7 +24,7 @@ typedef enum
     BSP_UART_COUNT
 } BspUartPort;
 
-/** 初始化 UART0 TX DMA 状态并使能 DMA 完成中断。 */
+/** 按project_config.h设置UART0格式，并初始化TX DMA状态和完成中断。 */
 void BSP_Uart_Init(void);
 
 /**

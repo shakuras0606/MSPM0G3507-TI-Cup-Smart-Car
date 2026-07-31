@@ -1,28 +1,14 @@
 /**
  * @file    line_sensor16.c
- * @brief   16 通道线传感器数据处理实现
+ * @brief   Hiwonder 8 路红外巡线模块 UART2 + DMA 底层
  *
- * 本模块是线传感器数据处理的核心，负责将从传感器接收到的原始数据
- * 转换为赛车控制算法所需的高层信息：黑线位置、线状态、诊断信息等。
+ * 手册协议：
+ *   0：上电后配置为手动读取模式；
+ *   2：读取模拟值，返回 55 AA 02 10 + 16B 数据 + checksum。
  *
- * 核心算法：加权质心法 (Weighted Centroid)
- *
- * 将 16 个传感器通道视为一维空间中的离散采样点，
- * 每个通道在空间中的坐标 channel_pos[i] 在 -1000..+1000 间线性分布：
- *
- *   channel_pos[0]  = -1000   (最左侧)
- *   channel_pos[15] = +1000   (最右侧)
- *   相邻通道间距 = 2000 / 15 ≈ 133.33
- *
- * 加权质心位置 position = sum(channel_pos[i] * value[i]) / sum(value[i])
- *
- *   其中 value[i] 在数字量模式下为 0 或 1，在模拟量模式下为灰度值（0..65535）。
- *   如果所有 value[i] 均为 0（完全无信号），则 line_lost = true。
- *
- * 诊断功能：
- *   - 活跃通道计数 (active_count)
- *   - 诊断掩码（模拟模式下强度 >= 峰值一半的通道）
- *   - 峰值/总强度统计
+ * 本驱动不读取模块自动计算的数字状态，也不依赖模块灰度学习结果。
+ * DMA_CH2 一次搬运完整 21 字节模拟帧，MSPM0 再按 project_config.h
+ * 的阈值生成黑线掩码、加权位置和丢线状态。
  */
 
 #include "line_sensor16.h"
@@ -30,76 +16,349 @@
 #include <stddef.h>
 #include <string.h>
 
-/** 模块内部状态变量（全局单例） */
+#include "bsp_time.h"
+#include "byte_ring.h"
+#include "project_config.h"
+#include "ti_msp_dl_config.h"
+
+#define LINE_UART_MODE_MANUAL           (0u)
+#define LINE_UART_COMMAND_ANALOG        (2u)
+#define LINE_UART_FRAME_HEADER_1        (0x55u)
+#define LINE_UART_FRAME_HEADER_2        (0xAAu)
+#define LINE_UART_ANALOG_PAYLOAD_SIZE   (16u)
+#define LINE_UART_ANALOG_FRAME_SIZE     (21u)
+#define LINE_UART_RX_RING_SIZE          (64u)
+#define LINE_SENSOR_VALID_MASK          (0x00FFu)
+
+typedef enum
+{
+    LINE_REQUEST_NONE = 0,
+    LINE_REQUEST_ANALOG
+} LineRequest;
+
 static LineSensor16Data g_data;
 
-/**
- * @brief 计算通道 i 在一维空间中的位置坐标
- * @param channel 通道索引 (0..15)
- * @return 坐标值 (-1000..+1000)
- *
- * 16 个通道均匀覆盖 -1000 到 +1000 的范围，
- * 步长为 2000 / 15 = 133（整数除法）
- */
+/** S1 最左、S8 最右；保持与旧位置环相近的 ±1400 满量程。 */
+static const int16_t k_channel_position_weights[
+    LINE_SENSOR_PHYSICAL_CHANNEL_COUNT] = {
+    CONFIG_LINE_SENSOR_WEIGHT_S1,
+    CONFIG_LINE_SENSOR_WEIGHT_S2,
+    CONFIG_LINE_SENSOR_WEIGHT_S3,
+    CONFIG_LINE_SENSOR_WEIGHT_S4,
+    CONFIG_LINE_SENSOR_WEIGHT_S5,
+    CONFIG_LINE_SENSOR_WEIGHT_S6,
+    CONFIG_LINE_SENSOR_WEIGHT_S7,
+    CONFIG_LINE_SENSOR_WEIGHT_S8
+};
+
+static volatile uint8_t g_dma_rx_buffer[LINE_UART_ANALOG_FRAME_SIZE];
+static volatile uint8_t g_dma_rx_length;
+static volatile uint8_t g_dma_tx_byte;
+static volatile bool g_tx_busy;
+
+static uint8_t g_rx_storage[LINE_UART_RX_RING_SIZE];
+static ByteRing g_rx_ring;
+
+static LineRequest g_pending_request;
+static uint32_t g_request_start_ms;
+static uint32_t g_last_mode_command_ms;
+
+static uint8_t g_frame[LINE_UART_ANALOG_FRAME_SIZE];
+static uint8_t g_frame_index;
+
+static uint16_t g_analog_values[LINE_SENSOR_PHYSICAL_CHANNEL_COUNT];
+static bool g_analog_valid;
+
 static int16_t channel_position(uint8_t channel)
 {
-    /*
-     * 插值公式：
-     *   position = -1000 + channel * 2000 / 15
-     *
-     * 使用 int32_t 中间计算以避免 channel * 2000 溢出
-     * (uint8_t max 255 * 2000 = 510000，在 int32_t 范围内安全)
-     */
-    return (int16_t)(-1000 + ((int32_t)channel * 2000) / 15);
+    if (channel >= LINE_SENSOR_PHYSICAL_CHANNEL_COUNT) {
+        return 0;
+    }
+    return k_channel_position_weights[channel];
 }
 
-void LineSensor16_Init(void)
+static void start_rx_dma(uint8_t length)
 {
-    memset(&g_data, 0, sizeof(g_data));
-    g_data.line_lost = true;                    /* 初始状态：线丢失 */
-    g_data.source = LINE_SENSOR16_SOURCE_NONE;   /* 数据来源：未收到 */
+    DL_DMA_disableChannel(DMA, DMA_CH2_CHAN_ID);
+    g_dma_rx_length = length;
+    DL_DMA_setSrcAddr(DMA, DMA_CH2_CHAN_ID,
+                      (uint32_t)&LINE_UART_INST->RXDATA);
+    DL_DMA_setDestAddr(DMA, DMA_CH2_CHAN_ID,
+                       (uint32_t)&g_dma_rx_buffer[0]);
+    DL_DMA_setTransferSize(DMA, DMA_CH2_CHAN_ID, length);
+    DL_DMA_enableChannel(DMA, DMA_CH2_CHAN_ID);
 }
 
-void LineSensor16_UpdateDigital(uint16_t raw_mask, bool active_low)
+static bool send_byte_dma(uint8_t value)
 {
-    /*
-     * active_low 处理：
-     *   active_low = true  -> 掩码中 0 为有效（低电平有效），取反
-     *   active_low = false -> 掩码中 1 为有效（高电平有效），不变
-     */
-    uint16_t active_mask = active_low ? (uint16_t)~raw_mask : raw_mask;
-    int32_t weighted_sum = 0;
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    if (g_tx_busy) {
+        if (primask == 0u) {
+            __enable_irq();
+        }
+        return false;
+    }
+    g_tx_busy = true;
+    g_dma_tx_byte = value;
+    if (primask == 0u) {
+        __enable_irq();
+    }
+
+    DL_DMA_setSrcAddr(DMA, DMA_CH3_CHAN_ID,
+                      (uint32_t)&g_dma_tx_byte);
+    DL_DMA_setDestAddr(DMA, DMA_CH3_CHAN_ID,
+                       (uint32_t)&LINE_UART_INST->TXDATA);
+    DL_DMA_setTransferSize(DMA, DMA_CH3_CHAN_ID, 1u);
+    DL_DMA_enableChannel(DMA, DMA_CH3_CHAN_ID);
+    return true;
+}
+
+static void restore_analog_values(void)
+{
     uint8_t index;
 
-    /* 清除旧的模拟数据，准备写入新的数字量数据 */
-    memset(g_data.values, 0, sizeof(g_data.values));
-    g_data.raw_mask = raw_mask;
-    g_data.active_count = 0u;
-    g_data.peak_strength = 0u;
+    if (!g_analog_valid) {
+        return;
+    }
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        g_data.values[index] = g_analog_values[index];
+    }
+    for (; index < LINE_SENSOR16_CHANNEL_COUNT; ++index) {
+        g_data.values[index] = 0u;
+    }
+}
 
-    /* 遍历 16 个通道，对每个有效通道累加加权位置 */
-    for (index = 0u; index < LINE_SENSOR16_CHANNEL_COUNT; ++index) {
-        if ((active_mask & ((uint16_t)1u << index)) != 0u) {
-            g_data.values[index] = 1u;                    /* 标记为有效 */
-            weighted_sum += channel_position(index);       /* 累加加权位置 */
-            ++g_data.active_count;                         /* 计数 */
+static uint8_t frame_checksum(const uint8_t *frame, uint8_t payload_size)
+{
+    uint8_t sum = 0u;
+    uint8_t index;
+
+    for (index = 2u; index < (uint8_t)(4u + payload_size); ++index) {
+        sum = (uint8_t)(sum + frame[index]);
+    }
+    return (uint8_t)~sum;
+}
+
+static void apply_analog_threshold(uint32_t now_ms)
+{
+    uint16_t black_mask = 0u;
+    uint8_t index;
+
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        bool is_black;
+
+        if (CONFIG_LINE_SENSOR_ANALOG_BLACK_HIGH != 0u) {
+            is_black =
+                g_analog_values[index] > CONFIG_LINE_SENSOR_ADC_THRESHOLD;
+        } else {
+            is_black =
+                g_analog_values[index] < CONFIG_LINE_SENSOR_ADC_THRESHOLD;
+        }
+        if (is_black) {
+            black_mask |= (uint16_t)1u << index;
         }
     }
 
     /*
-     * 数字模式下，每个有效通道的值视为 1，因此：
-     *   total_strength = active_count
-     *   peak_strength  = 1 (有通道有效) 或 0 (无通道有效)
+     * black_mask 已经由 MSPM0 归一化为“1=黑线”，因此不再使用模块
+     * 自动数字量的极性。UpdateDigital 只负责加权位置和活跃通道统计。
      */
+    LineSensor16_UpdateDigital(black_mask, false);
+    restore_analog_values();
+    g_data.online = true;
+    g_data.last_update_ms = now_ms;
+    ++g_data.state_frames;
+    g_data.source = LINE_SENSOR16_SOURCE_UART;
+}
+
+static void complete_analog_frame(uint32_t now_ms)
+{
+    uint8_t index;
+
+    if ((g_frame[2] != LINE_UART_COMMAND_ANALOG) ||
+        (g_frame[3] != LINE_UART_ANALOG_PAYLOAD_SIZE) ||
+        (frame_checksum(g_frame, g_frame[3]) !=
+         g_frame[LINE_UART_ANALOG_FRAME_SIZE - 1u])) {
+        ++g_data.protocol_errors;
+        return;
+    }
+
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        uint8_t logical_index =
+            (CONFIG_LINE_SENSOR_REVERSE_ORDER != 0u) ?
+            (uint8_t)(LINE_SENSOR_PHYSICAL_CHANNEL_COUNT - 1u - index) :
+            index;
+        uint8_t offset = (uint8_t)(4u + index * 2u);
+
+        g_analog_values[logical_index] =
+            (uint16_t)g_frame[offset] |
+            ((uint16_t)g_frame[(uint8_t)(offset + 1u)] << 8);
+    }
+    g_analog_valid = true;
+    ++g_data.analog_frames;
+    apply_analog_threshold(now_ms);
+}
+
+static void parse_analog_byte(uint8_t value, uint32_t now_ms)
+{
+    if (g_frame_index == 0u) {
+        if (value == LINE_UART_FRAME_HEADER_1) {
+            g_frame[0] = value;
+            g_frame_index = 1u;
+        }
+        return;
+    }
+
+    if (g_frame_index == 1u) {
+        if (value == LINE_UART_FRAME_HEADER_2) {
+            g_frame[1] = value;
+            g_frame_index = 2u;
+        } else if (value != LINE_UART_FRAME_HEADER_1) {
+            g_frame_index = 0u;
+        }
+        return;
+    }
+
+    g_frame[g_frame_index++] = value;
+    if ((g_frame_index == 4u) &&
+        (g_frame[3] > LINE_UART_ANALOG_PAYLOAD_SIZE)) {
+        g_frame_index = 0u;
+        g_pending_request = LINE_REQUEST_NONE;
+        ++g_data.protocol_errors;
+        return;
+    }
+
+    if ((g_frame_index >= 4u) &&
+        (g_frame_index == (uint8_t)(5u + g_frame[3]))) {
+        complete_analog_frame(now_ms);
+        g_frame_index = 0u;
+        g_pending_request = LINE_REQUEST_NONE;
+    }
+}
+
+static void process_rx_bytes(uint32_t now_ms)
+{
+    uint8_t value;
+
+    while (ByteRing_Pop(&g_rx_ring, &value)) {
+        if (g_pending_request == LINE_REQUEST_ANALOG) {
+            parse_analog_byte(value, now_ms);
+        } else {
+            /* 没有模拟量请求时出现的字节不参与巡线，避免误用模块数字量。 */
+            ++g_data.protocol_errors;
+        }
+    }
+    g_data.rx_overflows = ByteRing_OverflowCount(&g_rx_ring);
+}
+
+static bool start_analog_request(uint32_t now_ms)
+{
+    if (g_tx_busy) {
+        return false;
+    }
+    start_rx_dma(LINE_UART_ANALOG_FRAME_SIZE);
+    if (!send_byte_dma(LINE_UART_COMMAND_ANALOG)) {
+        start_rx_dma(1u);
+        return false;
+    }
+    g_pending_request = LINE_REQUEST_ANALOG;
+    g_request_start_ms = now_ms;
+    g_frame_index = 0u;
+    return true;
+}
+
+void LineSensor16_Init(void)
+{
+    uint32_t now_ms = BSP_Time_Millis();
+
+    memset(&g_data, 0, sizeof(g_data));
+    memset(g_analog_values, 0, sizeof(g_analog_values));
+    ByteRing_Init(&g_rx_ring, g_rx_storage, (uint16_t)sizeof(g_rx_storage));
+    g_data.line_lost = true;
+    g_data.source = LINE_SENSOR16_SOURCE_NONE;
+    g_analog_valid = false;
+    g_pending_request = LINE_REQUEST_NONE;
+    g_frame_index = 0u;
+    g_tx_busy = false;
+
+    NVIC_DisableIRQ(LINE_UART_INST_INT_IRQN);
+    NVIC_ClearPendingIRQ(LINE_UART_INST_INT_IRQN);
+    start_rx_dma(1u);
+    NVIC_EnableIRQ(LINE_UART_INST_INT_IRQN);
+
+    g_last_mode_command_ms = now_ms;
+    (void)send_byte_dma(LINE_UART_MODE_MANUAL);
+}
+
+void LineSensor16_Scan(void)
+{
+    uint32_t now_ms = BSP_Time_Millis();
+
+    process_rx_bytes(now_ms);
+
+    if ((g_pending_request != LINE_REQUEST_NONE) &&
+        ((uint32_t)(now_ms - g_request_start_ms) >=
+         CONFIG_LINE_SENSOR_UART_RESPONSE_TIMEOUT_MS)) {
+        g_pending_request = LINE_REQUEST_NONE;
+        g_frame_index = 0u;
+        ++g_data.protocol_errors;
+    }
+
+    if (!g_data.online ||
+        ((uint32_t)(now_ms - g_data.last_update_ms) >
+         CONFIG_LINE_SENSOR_UART_STALE_TIMEOUT_MS)) {
+        g_data.online = false;
+        g_data.line_lost = true;
+        g_data.active_count = 0u;
+        g_data.active_mask = 0u;
+
+        /*
+         * 模块比主控晚供电或运行中复位时，周期重发手动模式配置。
+         * 模块已在线后不重复配置，符合手册“模式仅复位后重配”的要求。
+         */
+        if ((g_pending_request == LINE_REQUEST_NONE) &&
+            ((uint32_t)(now_ms - g_last_mode_command_ms) >=
+             CONFIG_LINE_SENSOR_UART_MODE_RETRY_MS) &&
+            send_byte_dma(LINE_UART_MODE_MANUAL)) {
+            g_last_mode_command_ms = now_ms;
+            return;
+        }
+    }
+
+    if (g_pending_request != LINE_REQUEST_NONE) {
+        return;
+    }
+
+    (void)start_analog_request(now_ms);
+}
+
+void LineSensor16_UpdateDigital(uint16_t raw_mask, bool active_low)
+{
+    uint16_t masked_raw = raw_mask & LINE_SENSOR_VALID_MASK;
+    uint16_t active_mask = active_low ?
+        ((uint16_t)~masked_raw & LINE_SENSOR_VALID_MASK) : masked_raw;
+    int32_t weighted_sum = 0;
+    uint8_t index;
+
+    memset(g_data.values, 0, sizeof(g_data.values));
+    g_data.raw_mask = masked_raw;
+    g_data.active_mask = active_mask;
+    g_data.active_count = 0u;
+
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        if ((active_mask & ((uint16_t)1u << index)) != 0u) {
+            g_data.values[index] = 1u;
+            weighted_sum += channel_position(index);
+            ++g_data.active_count;
+        }
+    }
+
     g_data.total_strength = g_data.active_count;
     g_data.peak_strength = (g_data.active_count == 0u) ? 0u : 1u;
     g_data.line_lost = (g_data.active_count == 0u);
-
     if (!g_data.line_lost) {
-        /*
-         * 加权平均：position = sum(channel_pos[i] * 1) / active_count
-         * 使用 int32_t 中间计算避免溢出
-         */
         g_data.position =
             (int16_t)(weighted_sum / (int32_t)g_data.active_count);
     }
@@ -110,25 +369,20 @@ void LineSensor16_UpdateAnalog(
     const uint16_t values[LINE_SENSOR16_CHANNEL_COUNT])
 {
     uint32_t total = 0u;
-    int64_t weighted_sum = 0;    /* 使用 int64_t 避免大值求和溢出 */
+    int64_t weighted_sum = 0;
     uint16_t peak = 0u;
-    uint16_t mask = 0u;          /* 诊断掩码 */
     uint8_t index;
 
     if (values == NULL) {
         return;
     }
 
-    /*
-     * 第一遍扫描：计算总和、加权和、峰值
-     *
-     * weighted_sum 可能非常大：
-     *   最大 = 16 * 1000 * 65535 = 1,048,560,000
-     *   超出 int32_t 范围 (2,147,483,647 内，安全)
-     *   但使用 int64_t 作为预防措施
-     */
-    for (index = 0u; index < LINE_SENSOR16_CHANNEL_COUNT; ++index) {
+    memset(g_data.values, 0, sizeof(g_data.values));
+    g_data.active_mask = 0u;
+    g_data.active_count = 0u;
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
         uint16_t value = values[index];
+
         g_data.values[index] = value;
         total += value;
         weighted_sum += (int32_t)channel_position(index) * value;
@@ -137,39 +391,23 @@ void LineSensor16_UpdateAnalog(
         }
     }
 
-    /*
-     * 第二遍扫描（仅当有信号时）：生成诊断掩码
-     *
-     * 诊断掩码用于标示哪些通道"有信号"（强度 >= 峰值的一半）。
-     * 这有助于调试和可视化，不影响位置计算（位置始终使用全精度）。
-     *
-     * 阈值 = (peak + 1) / 2：向上取整，避免小峰值时全部通道被排除
-     */
-    g_data.active_count = 0u;
     if (peak != 0u) {
         uint16_t threshold = (uint16_t)((peak + 1u) / 2u);
-        for (index = 0u; index < LINE_SENSOR16_CHANNEL_COUNT; ++index) {
+
+        for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
             if (g_data.values[index] >= threshold) {
-                mask |= (uint16_t)1u << index;
+                g_data.active_mask |= (uint16_t)1u << index;
                 ++g_data.active_count;
             }
         }
     }
 
-    /* 填充输出数据结构 */
-    g_data.raw_mask = mask;
+    g_data.raw_mask = g_data.active_mask;
     g_data.total_strength =
         (total > UINT16_MAX) ? UINT16_MAX : (uint16_t)total;
     g_data.peak_strength = peak;
     g_data.line_lost = (total == 0u);
-
     if (!g_data.line_lost) {
-        /*
-         * 全精度加权平均位置：
-         *   position = sum(channel_pos[i] * value[i]) / sum(value[i])
-         *
-         * 使用 int64_t 除法以确保精度
-         */
         g_data.position = (int16_t)(weighted_sum / (int64_t)total);
     }
     g_data.source = LINE_SENSOR16_SOURCE_ANALOG;
@@ -178,4 +416,30 @@ void LineSensor16_UpdateAnalog(
 const LineSensor16Data *LineSensor16_GetData(void)
 {
     return &g_data;
+}
+
+void LINE_UART_INST_IRQHandler(void)
+{
+    uint8_t index;
+
+    switch (DL_UART_Main_getPendingInterrupt(LINE_UART_INST)) {
+    case DL_UART_MAIN_IIDX_DMA_DONE_RX:
+        for (index = 0u; index < g_dma_rx_length; ++index) {
+            (void)ByteRing_PushFromIsr(
+                &g_rx_ring, g_dma_rx_buffer[index]);
+        }
+        /*
+         * 默认立即恢复1字节接收，避免两次主循环调度之间UART无DMA接收。
+         * 发起模拟量命令前，start_analog_request()会切换为完整21字节DMA。
+         */
+        start_rx_dma(1u);
+        break;
+
+    case DL_UART_MAIN_IIDX_DMA_DONE_TX:
+        g_tx_busy = false;
+        break;
+
+    default:
+        break;
+    }
 }

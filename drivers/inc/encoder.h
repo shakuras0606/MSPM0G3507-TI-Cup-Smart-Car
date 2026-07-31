@@ -6,8 +6,8 @@
  *   - M1：PB0=A，PB1=B
  *   - M2：PB2=A，PB3=B
  *
- * 计数在 GPIOB GROUP1 中断中完成；10 ms 计数快照由 SysTick 中断完成；
- * 主循环调用 Encoder_Update() 时只对最近 100 ms 快照执行 RPM 除法。
+ * 计数在 GPIOB GROUP1 中断中完成；快照由 SysTick 按配置频率完成；
+ * 主循环调用 Encoder_Update() 时只对最近测速窗口执行 RPM 除法。
  */
 
 #ifndef ENCODER_H_
@@ -59,7 +59,8 @@ void Encoder_Tick1msFromIsr(uint32_t now_ms);
 /**
  * @brief 在主循环中更新两路车轮 RPM。
  *
- * 10 ms 快照已由 SysTick 准时采集。本函数仅在有新快照时使用最近
+ * 快照已由 SysTick 按CONFIG_TASK_ENCODER_CAPTURE_HZ准时采集。本函数
+ * 仅在有新快照时使用最近
  * CONFIG_ENCODER_MEASUREMENT_WINDOW_MS 的端点计算，不需要主循环准时调用。
  */
 void Encoder_Update(void);

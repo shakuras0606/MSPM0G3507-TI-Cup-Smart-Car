@@ -12,13 +12,18 @@
  * 每次都严格准时。
  *
  * 连续形式：
- *   u(t) = Kp*e(t) + Ki*integral(e dt) + Kd*de/dt
+ *   u(t) = u_ff(t) + Kp*e(t) + Ki*integral(e dt) + Kd*de/dt
  *
  * 本实现离散形式：
  *   error = setpoint - measurement
  *   I[k]  = clamp(I[k-1] + Ki*error*dt)
  *   D[k]  = Kd * LPF(d(error)/dt 或 -d(measurement)/dt)
- *   output = clamp(P + I + D)
+ *   output = clamp(feedforward + P + I + D)
+ *
+ * 普通控制环可继续调用Pid_Update()，其前馈固定为0。已建立对象模型的
+ * 速度环可调用Pid_UpdateWithFeedforward()。前馈参与最终输出限幅和条件
+ * 积分抗饱和，因此不要在函数返回后再简单相加，否则积分器看不到真实
+ * 的输出饱和状态。
  */
 
 #ifndef PID_H_
@@ -44,6 +49,15 @@ typedef struct
     float integral_max;             /**< 积分项最大值，量纲与输出相同。 */
 
     /**
+     * 积分分离阈值，量纲与error相同。
+     *
+     * 设为0表示关闭积分分离。大于0时，|error|达到阈值后不再继续向误差
+     * 同方向积累，但仍允许与现有积分反方向的误差卸载积分。这样堵转等
+     * 大误差不会把积分堆满，松手后又能快速清除已有积分。
+     */
+    float integral_separation_threshold;
+
+    /**
      * 微分低通滤波时间常数，单位 s。
      * 设为 0 表示不滤波；数值越大，微分越平滑但相位延迟越大。
      */
@@ -60,11 +74,13 @@ typedef struct
 typedef struct
 {
     float error;                    /**< setpoint - measurement。 */
+    float feedforward;              /**< 外部前馈项；不积分，量纲与输出相同。 */
     float proportional;             /**< P 项。 */
     float integral;                 /**< I 项。 */
     float derivative;               /**< D 项。 */
-    float output;                   /**< 限幅后的最终输出。 */
-    bool saturated;                 /**< 最终输出是否触及上下限。 */
+    float output;                   /**< 前馈+PID限幅后的最终输出。 */
+    bool saturated;                 /**< 总输出是否触及上下限。 */
+    bool integral_separated;        /**< true=大误差触发积分分离，本拍未继续累积。 */
 } PidTerms;
 
 /**
@@ -116,6 +132,22 @@ void Pid_Reset(PidController *controller, float initial_measurement);
  */
 float Pid_Update(PidController *controller, float setpoint,
                  float measurement, float dt_s);
+
+/**
+ * @brief 执行一次带前馈的 PID 计算。
+ * @param controller  控制器实例。
+ * @param setpoint    目标值。
+ * @param measurement 当前测量值。
+ * @param feedforward 根据目标值/模型预先计算的基础输出，量纲与输出相同。
+ * @param dt_s        本次控制间隔，单位 s，必须大于 0。
+ * @return 前馈与PID修正相加并限幅后的输出。
+ *
+ * 前馈不进入积分状态，但会参与总输出限幅和条件积分抗饱和。这样当
+ * “前馈+P+I+D”达到上限时，正误差不会继续把积分推向更深饱和。
+ */
+float Pid_UpdateWithFeedforward(PidController *controller, float setpoint,
+                                float measurement, float feedforward,
+                                float dt_s);
 
 /**
  * @brief 读取最近一次 PID 分项。

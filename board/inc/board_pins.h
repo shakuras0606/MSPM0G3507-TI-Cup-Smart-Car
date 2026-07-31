@@ -1,6 +1,6 @@
 /**
  * @file    board_pins.h
- * @brief   MSPM0G3507 LQFP-64 引脚分配 (v0.5.0 WT61/DMA 版)
+ * @brief   MSPM0G3507 LQFP-64 引脚分配 (v0.6.0 8路UART巡线版)
  *
  * ========================== 引脚分配总览 ==========================
  * M1 电机 (TIMG7):
@@ -15,11 +15,12 @@
  * 使用 GROUP1_IRQHandler 完成 x4 正交解码。
  *
  * 显示 (ST7735):
- *   SCLK PB9, MOSI PB8, RES PB10, DC PB11, CS PB14, BLK PB26
+ *   SCLK PB9, MOSI PB8, RES PB10, DC PB11, CS PB14, BLK直接接3.3V
  *
  * 通信:
- *   PC UART TX/RX:    PA10 / PA11 (UART0, 921600, TX DMA_CH0)
+ *   VOFA UART TX/RX:  PA10 / PA11 (UART0, 波特率见project_config.h, TX DMA_CH0)
  *   WT61 TX/RX:       PA9  / PA8  (UART1, 115200, RX DMA_CH1)
+ *   8路巡线 TX/RX:    PA22 / PA21 (UART2, 115200, RX/TX DMA_CH2/CH3)
  *
  * 传感器:
  *   WT61TTL:          模块 TX -> PA9，模块 RX -> PA8
@@ -30,7 +31,10 @@
  *   扩展板KEY1 PB12和KEY2 PB13当前不参与速度控制。
  *   扩展板将PB21引出为IMU_CS_A，使用板载按键时该网络不可被外设主动驱动。
  *
- * 线传感器 16ch: 待定
+ * Hiwonder 8路红外巡线模块:
+ *   模块TX -> PA22/UART2_RX，模块RX -> PA21/UART2_TX，115200-8-N-1。
+ *   模块按手册使用5V供电并与主控共地；软件读取原始模拟量并自行判线。
+ *   原16路模块的PA24、PA28、PA31、PB26、PB27已全部释放。
  *
  * 注意：PA8/PA9 和 PB6/PB7 是 UART1 的两组复用位置，并不是两路 UART。
  * 当前 UART1 已由 WT61 独占，原 PB6/PB7 蓝牙不能同时启用。
@@ -44,11 +48,12 @@ typedef enum
 {
     BOARD_LINE_SENSOR_TRANSPORT_UNASSIGNED = 0,
     BOARD_LINE_SENSOR_TRANSPORT_UART,
+    BOARD_LINE_SENSOR_TRANSPORT_I2C,
     BOARD_LINE_SENSOR_TRANSPORT_ADC,
     BOARD_LINE_SENSOR_TRANSPORT_GPIO,
     BOARD_LINE_SENSOR_TRANSPORT_SPI
 } BoardLineSensorTransport;
 
-#define BOARD_LINE_SENSOR_TRANSPORT BOARD_LINE_SENSOR_TRANSPORT_UNASSIGNED
+#define BOARD_LINE_SENSOR_TRANSPORT BOARD_LINE_SENSOR_TRANSPORT_UART
 
 #endif /* BOARD_PINS_H_ */

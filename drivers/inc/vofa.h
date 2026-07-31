@@ -18,7 +18,11 @@
 #include <stdint.h>
 #include "bsp_uart.h"
 
-#define VOFA_MAX_CHANNELS   (10u)
+/**
+ * 当前巡线位置外环调试共12通道。
+ * 缓冲区：12*4字节float + 4字节帧尾 = 52字节。
+ */
+#define VOFA_MAX_CHANNELS   (12u)
 
 void Vofa_Init(BspUartPort port, uint8_t channel_count);
 void Vofa_PutFloat(float value);

@@ -12,15 +12,15 @@ SysConfig 1.26.2。当前版本 v0.6.0。
 | 上下文 | 周期/触发 | 工作 |
 |---|---:|---|
 | 编码器 GPIO ISR | A/B 任一边沿 | x4 查表并累计计数 |
-| SysTick ISR | 1 ms；每 10 ms 采样 | 保存两路累计计数和准确时间，不计算 RPM |
+| SysTick ISR | 1 ms；200 Hz快照 | 保存两路累计计数和准确时间，不计算 RPM |
 | UART1 ISR | 每 11 字节 DMA 完成 | WT61 DMA 数据复制入环形缓冲区并重启 DMA |
 | UART0 ISR | 每帧 TX DMA 完成 | 释放 VOFA DMA 发送缓冲区 |
 | 主循环 | 尽快 | WT61 解包、RPM 64 位除法、控制算法 |
-| 主循环定时任务 | 10 ms | 两路独立车轮速度PID |
-| 主循环定时任务 | 10 ms | VOFA JustFloat 发送 |
-| 主循环低优先级任务 | 200 ms | ST7735 局部刷新 |
+| 主循环定时任务 | 200 Hz | 两路独立车轮速度PID |
+| 主循环定时任务 | 100 Hz | VOFA JustFloat 发送 |
+| 主循环低优先级任务 | 5 Hz | ST7735 局部刷新 |
 
-因此屏幕软件 SPI 即使占用了一段主循环时间，编码器 10 ms 快照仍由
+因此屏幕软件 SPI 即使占用了一段主循环时间，编码器200 Hz快照仍由
 SysTick 准时完成，WT61 仍由 DMA 接收。中断中不做浮点、除法、协议解析
 或屏幕刷新。
 
@@ -96,12 +96,14 @@ DMA 通道。
 #define CONFIG_ENCODER_DECODE_MULTIPLIER              (4u)
 #define CONFIG_ENCODER_M1_MOTOR_TO_WHEEL_RATIO_NUM   (28u)
 #define CONFIG_ENCODER_M2_MOTOR_TO_WHEEL_RATIO_NUM   (28u)
-#define CONFIG_ENCODER_UPDATE_PERIOD_MS              (10u)
-#define CONFIG_ENCODER_MEASUREMENT_WINDOW_MS        (100u)
+#define CONFIG_PID_SPEED_HZ                        (200u)
+#define CONFIG_TASK_ENCODER_CAPTURE_HZ             (CONFIG_PID_SPEED_HZ)
+#define CONFIG_ENCODER_MEASUREMENT_WINDOW_MS         (50u)
 ```
 
-车轮一圈理论计数为 `13 × 4 × 28 = 1456`。SysTick 每 10 ms 保存一个
-准确快照，主循环用最近 100 ms 两个端点计算：
+车轮一圈理论计数为 `13 × 4 × 28 = 1456`。SysTick以200 Hz保存准确
+快照，主循环用最近50 ms两个端点计算。速度环与快照频率绑定，因此修改
+`CONFIG_PID_SPEED_HZ`时，快照周期和窗口端点数会自动同步：
 
 ```text
 wheel_RPM =
@@ -122,7 +124,7 @@ wheel_RPM =
 0 → 50 → 100 → 150 → 200 → 250 → 300 → 0 RPM
 ```
 
-两轮使用独立PID实例，控制周期10 ms。初始参数为：
+两轮使用独立PID实例，控制频率200 Hz。初始参数为：
 
 ```c
 Kp = 2.0f;
@@ -148,27 +150,31 @@ WT61 标准帧固定为 11 字节：
 
 VOFA+ 设置：
 
-- 串口：板载 CH343 对应的 COM 口；
-- 波特率：`921600`；
+- 串口：无线接收端或板载CH343对应的COM口；
+- 波特率：`CONFIG_VOFA_UART_BAUD_RATE`，当前为`921600`；
 - 数据引擎：`JustFloat`；
-- 发送周期：10 ms；
-- 通道数：11。
+- 发送频率：100 Hz；
+- 通道数：10。
+
+VOFA串口参数集中在`project_config.h`，修改波特率、停止位或校验后，
+`BSP_Uart_Init()`会在启动时重新应用到UART0；PA10/PA11和DMA_CH0仍在
+`empty.syscfg`中分配。无线模块、无线接收端和VOFA必须使用完全相同的
+波特率、数据位、校验与停止位。
 
 | VOFA 通道 | 数据 |
 |---:|---|
-| ch0 | 共同目标RPM |
-| ch1 | M1车轮RPM |
-| ch2 | M2车轮RPM |
-| ch3 | M1 PWM千分比输出 |
-| ch4 | M2 PWM千分比输出 |
-| ch5 | M1 RPM误差 |
-| ch6 | M2 RPM误差 |
-| ch7 | 方向故障掩码：0正常，1=M1，2=M2，3=两路 |
-| ch8 | Yaw，degree |
-| ch9 | Pitch，degree |
-| ch10 | Roll，degree |
+| ch0 | M1目标RPM |
+| ch1 | M1实际RPM |
+| ch2 | M2目标RPM |
+| ch3 | M2实际RPM |
+| ch4 | 巡线目标位置 |
+| ch5 | 巡线实际位置 |
+| ch6 | 巡线位置误差 |
+| ch7 | 目标Yaw，degree |
+| ch8 | 实际Yaw，degree |
+| ch9 | Yaw环差速RPM |
 
-如果后三路始终为 0：
+如果Yaw相关通道始终为0：
 
 1. 确认交叉接线和共地；
 2. 确认 WT61 当前波特率与工程一致，当前均为115200；

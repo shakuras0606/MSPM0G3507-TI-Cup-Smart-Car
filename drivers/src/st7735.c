@@ -239,7 +239,7 @@ void ST7735_Init(void)
     uint8_t data[3];
 
     /* ----- 硬件复位序列 ----- */
-    pin_set(LCD_CS_PIN | LCD_DC_PIN | LCD_RST_PIN | LCD_BL_PIN);
+    pin_set(LCD_CS_PIN | LCD_DC_PIN | LCD_RST_PIN);
     pin_clear(LCD_SCLK_PIN | LCD_MOSI_PIN);
     delay_ms(10u);
 
@@ -332,7 +332,8 @@ uint16_t ST7735_GetHeight(void) { return display_height; }
 
 void ST7735_Backlight(bool on)
 {
-    if (on) pin_set(LCD_BL_PIN); else pin_clear(LCD_BL_PIN);
+    /* BLK已直接接3.3V，保留空实现仅用于兼容已有调用。 */
+    (void)on;
 }
 
 void ST7735_DrawPixel(uint16_t x, uint16_t y, uint16_t color)
