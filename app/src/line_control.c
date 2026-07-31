@@ -27,6 +27,7 @@ typedef struct
     float last_target_yaw_deg;
     float filtered_position;
     float commanded_base_rpm;
+    float speed_scale;
     bool line_lost_timing;
 } LineControlState;
 
@@ -69,8 +70,10 @@ static float move_toward(float current, float target, float max_step)
 static float calculate_curve_base(float position)
 {
     float error = absolute_float(position - CONFIG_LINE_TARGET_POSITION);
-    float base_magnitude = absolute_float(CONFIG_LINE_BASE_RPM);
-    float minimum_magnitude = absolute_float(CONFIG_LINE_CURVE_MIN_RPM);
+    float base_magnitude =
+        absolute_float(CONFIG_LINE_BASE_RPM) * g_line.speed_scale;
+    float minimum_magnitude =
+        absolute_float(CONFIG_LINE_CURVE_MIN_RPM) * g_line.speed_scale;
     float ratio;
     float magnitude;
 
@@ -155,8 +158,19 @@ void LineControl_Init(uint32_t now_ms)
     g_line.last_target_yaw_deg = 0.0f;
     g_line.filtered_position = 0.0f;
     g_line.commanded_base_rpm = 0.0f;
+    g_line.speed_scale = 1.0f;
     g_line.line_lost_timing = false;
     YawControl_SetBaseRPM(0.0f);
+}
+
+void LineControl_SetSpeedScale(float scale)
+{
+    if (scale < 0.0f) {
+        scale = 0.0f;
+    } else if (scale > 1.0f) {
+        scale = 1.0f;
+    }
+    g_line.speed_scale = scale;
 }
 
 void LineControl_Stop(uint32_t now_ms)

@@ -22,6 +22,7 @@
 #include "app.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "board_button.h"
@@ -45,26 +46,25 @@ typedef struct
     uint32_t last_line_ms;      /**< 上次完成8通道扫描的时间，单位ms。 */
     uint32_t last_can_ms;       /**< 上次提交加速度CAN帧的调度时间，单位ms。 */
     uint32_t race_start_ms;     /**< 本圈按键有效并开始运动的时间。 */
-    uint32_t race_finish_ms;    /**< 确认到达终点横线时锁存的本圈用时。 */
-    uint32_t marker_change_ms;  /**< 起停线进入/离开确认的起始时间。 */
-    uint32_t brake_request_ms;  /**< 再次识别起停线的时间。 */
-    bool marker_timing;         /**< true=正在确认终点线。 */
-    bool release_timing;        /**< true=正在确认已驶离起跑线。 */
-    bool finish_armed;          /**< true=已驶离起跑线，可识别终点。 */
+    uint32_t race_finish_ms;    /**< 定时停车触发时锁存的本圈用时。 */
+    uint32_t brake_request_ms;  /**< 定时停车触发的系统时间。 */
+    bool infinite_mode;         /**< true=无限巡线，忽略定时停车。 */
     ScreenRaceState race_state; /**< 屏幕和比赛起停状态。 */
 } AppState;
 
 /** 应用层协作式任务调度状态；不在ISR中写入。 */
 static AppState g_app;
 
-static bool race_marker_present(const LineSensor16Data *line)
+/** PB12每次按下切换单圈定时停车/无限巡线模式。 */
+static void race_toggle_infinite_mode(void)
 {
-    return !line->line_lost &&
-           (line->active_count >=
-            CONFIG_RACE_MARKER_MIN_ACTIVE_CHANNELS);
+    g_app.infinite_mode = !g_app.infinite_mode;
+    LineControl_SetSpeedScale(
+        g_app.infinite_mode ?
+        ((float)CONFIG_RACE_INFINITE_SPEED_PERCENT / 100.0f) : 1.0f);
 }
 
-/** 返回从0开始的比赛用时；终点确认后锁存，制动期间不再变化。 */
+/** 返回从0开始的运行用时；定时停车触发后锁存，制动期间不再变化。 */
 static uint32_t race_elapsed_ms(uint32_t now_ms)
 {
     if (g_app.race_state == SCREEN_RACE_RUN) {
@@ -86,20 +86,15 @@ static void race_start(uint32_t now_ms)
     }
     g_app.race_start_ms = now_ms;
     g_app.race_finish_ms = 0u;
-    g_app.marker_change_ms = now_ms;
     g_app.brake_request_ms = 0u;
-    g_app.marker_timing = false;
-    g_app.release_timing = false;
-    g_app.finish_armed = false;
     g_app.race_state = SCREEN_RACE_RUN;
 }
 
-/** H题A点起停线状态机；B21运行中仍作为人工急停。 */
+/** B21直接启动巡线；普通模式定时停车，运行中B21仍可人工急停。 */
 static void race_update(uint32_t now_ms, bool button_event)
 {
-    const LineSensor16Data *line = LineSensor16_GetData();
     LineControlSnapshot control;
-    bool marker = race_marker_present(line);
+    uint32_t elapsed_ms;
 
     (void)LineControl_GetSnapshot(&control);
 
@@ -111,10 +106,8 @@ static void race_update(uint32_t now_ms, bool button_event)
             g_app.race_state = SCREEN_RACE_WAIT;
             return;
         }
-        /* 必须“按下B21”与“至少12路同时识别横线”在同一时刻成立。 */
-        if (marker) {
-            race_start(now_ms);
-        }
+        /* 取消起跑线门槛：停止状态按下B21立即尝试开始巡线。 */
+        race_start(now_ms);
         return;
     }
 
@@ -132,7 +125,7 @@ static void race_update(uint32_t now_ms, bool button_event)
     if (g_app.race_state == SCREEN_RACE_BRAKE) {
         if (g_app.brake_request_ms != 0u &&
             (uint32_t)(now_ms - g_app.brake_request_ms) >=
-            CONFIG_RACE_FINISH_BRAKE_DELAY_MS &&
+            CONFIG_RACE_AUTO_STOP_BRAKE_DELAY_MS &&
             !control.stopping) {
             LineControl_BeginStop(now_ms);
         }
@@ -142,46 +135,22 @@ static void race_update(uint32_t now_ms, bool button_event)
         return;
     }
 
-    /* 起步后必须连续离开横线一段时间，才允许把下一次横线识别为终点。 */
-    if (!g_app.finish_armed) {
-        if (!marker) {
-            if (!g_app.release_timing) {
-                g_app.marker_change_ms = now_ms;
-                g_app.release_timing = true;
-            } else if ((uint32_t)(now_ms - g_app.marker_change_ms) >=
-                       CONFIG_RACE_MARKER_RELEASE_MS) {
-                g_app.finish_armed = true;
-                g_app.release_timing = false;
-            }
-        } else {
-            g_app.release_timing = false;
-        }
+    /* 无限模式仅屏蔽定时停车，其余控制故障和B21急停仍然有效。 */
+    if (g_app.infinite_mode) {
         return;
     }
 
-    /* 最短圈时与连续确认同时满足，避免赛道宽线或ADC毛刺误停。 */
-    if ((uint32_t)(now_ms - g_app.race_start_ms) <
-        CONFIG_RACE_FINISH_MIN_TIME_MS) {
+    elapsed_ms = (uint32_t)(now_ms - g_app.race_start_ms);
+    if (elapsed_ms < CONFIG_RACE_AUTO_STOP_TIME_MS) {
         return;
     }
-    if (marker) {
-        if (!g_app.marker_timing) {
-            g_app.marker_change_ms = now_ms;
-            g_app.marker_timing = true;
-        } else if ((uint32_t)(now_ms - g_app.marker_change_ms) >=
-                   CONFIG_RACE_MARKER_CONFIRM_MS) {
-            g_app.brake_request_ms = now_ms;
-            /* 计时在确认到达终点线的这一刻锁存，而不是等柔和制动结束。 */
-            g_app.race_finish_ms =
-                (uint32_t)(now_ms - g_app.race_start_ms);
-            g_app.marker_timing = false;
-            g_app.race_state = SCREEN_RACE_BRAKE;
-            if (CONFIG_RACE_FINISH_BRAKE_DELAY_MS == 0u) {
-                LineControl_BeginStop(now_ms);
-            }
-        }
-    } else {
-        g_app.marker_timing = false;
+
+    /* 到时立即锁存计时并进入原有柔和制动，完全不读取启停线状态。 */
+    g_app.brake_request_ms = now_ms;
+    g_app.race_finish_ms = elapsed_ms;
+    g_app.race_state = SCREEN_RACE_BRAKE;
+    if (CONFIG_RACE_AUTO_STOP_BRAKE_DELAY_MS == 0u) {
+        LineControl_BeginStop(now_ms);
     }
 }
 
@@ -270,7 +239,7 @@ static void refresh_screen(void)
                       yaw.current_yaw_deg, online, line->values,
                       line->raw_mask, line->position, line->line_lost,
                       race_elapsed_ms(BSP_Time_Millis()),
-                      g_app.race_state);
+                      g_app.race_state, g_app.infinite_mode);
 }
 
 /**
@@ -310,11 +279,11 @@ void App_Init(void)
     g_app.last_can_ms = now;
     g_app.race_start_ms = now;
     g_app.race_finish_ms = 0u;
-    g_app.marker_change_ms = now;
     g_app.brake_request_ms = 0u;
-    g_app.marker_timing = false;
-    g_app.release_timing = false;
-    g_app.finish_armed = false;
+    g_app.infinite_mode = (CONFIG_RACE_INFINITE_MODE_DEFAULT != 0u);
+    LineControl_SetSpeedScale(
+        g_app.infinite_mode ?
+        ((float)CONFIG_RACE_INFINITE_SPEED_PERCENT / 100.0f) : 1.0f);
     g_app.race_state = SCREEN_RACE_WAIT;
 }
 
@@ -349,6 +318,9 @@ void App_RunOnce(void)
         CONFIG_TICKS_FROM_HZ(CONFIG_TASK_LINE_SENSOR_SCAN_HZ)) {
         g_app.last_line_ms = now;
         LineSensor16_Scan();
+    }
+    if (BoardModeButton_PressedEvent(now)) {
+        race_toggle_infinite_mode();
     }
     /* 默认进入H题起停线状态机；宏为0时恢复Yaw +90deg阶跃测试。 */
 #if (CONFIG_B21_LINE_FOLLOW_MODE != 0u)

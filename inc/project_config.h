@@ -147,9 +147,12 @@
 #define CONFIG_BMI270_SPI_HALF_CYCLES              (4u)    /* 软件 SPI 半周期延时计数 */
 #define CONFIG_WT61_FRAME_SIZE                     (11u)   /* WT61 标准帧长度/字节 */
 #define CONFIG_WT61_STALE_TIMEOUT_MS               (500u)  /* WT61 离线超时/ms */
-#define CONFIG_LINE_SENSOR_ADC_THRESHOLD           (1000u)  /* MSPM0模拟量判线阈值；先看屏幕原始值再调整 */
+#define CONFIG_LINE_SENSOR_ADC_THRESHOLD           (1000u)  /* 仅用于启停线/二值位图；不参与模拟位置计算 */
 #define CONFIG_LINE_SENSOR_ANALOG_BLACK_HIGH       (1u)    /* 1=模拟值>阈值为黑线；0=模拟值<阈值为黑线 */
 #define CONFIG_LINE_SENSOR_REVERSE_ORDER           (0u)    /* 0=S1左/S8右；实物安装相反时改为1 */
+#define CONFIG_LINE_SENSOR_POSITION_DIGITAL        (0u)    /* 原算法：超过阈值的通道等权平均 */
+#define CONFIG_LINE_SENSOR_POSITION_ANALOG_WEIGHTED (1u)   /* 新算法：8路原始ADC直接加权平均 */
+#define CONFIG_LINE_SENSOR_POSITION_MODE           CONFIG_LINE_SENSOR_POSITION_ANALOG_WEIGHTED /* 在这里选择巡线位置算法 */
 #define CONFIG_LINE_SENSOR_UART_RESPONSE_TIMEOUT_MS (20u)  /* 命令响应超时/ms */
 #define CONFIG_LINE_SENSOR_UART_STALE_TIMEOUT_MS   (100u)  /* 无状态数据后判串口离线/ms */
 #define CONFIG_LINE_SENSOR_UART_MODE_RETRY_MS      (250u)  /* 模块晚供电时重发手动模式/ms */
@@ -175,6 +178,8 @@
  * 调位置PID时先保持Yaw环、速度环参数不变，一次只改一个巡线参数。
  */
 #define CONFIG_B21_LINE_FOLLOW_MODE                  (1u)    /* 1=B21启停巡线；0=保留Yaw+90deg测试 */
+#define CONFIG_RACE_INFINITE_MODE_DEFAULT             (0u)    /* 0=上电单圈停车；1=上电无限巡线 */
+#define CONFIG_RACE_INFINITE_SPEED_PERCENT           (65u)    /* 无限模式速度占普通模式百分比，建议60~70 */
 #define CONFIG_LINE_TARGET_POSITION                  (0.0f)  /* 期望质心/权重单位；非0可补偿固定偏差 */
 #define CONFIG_LINE_BASE_RPM                         (-105.0f)/* 直道巡航RPM；当前负值代表车体前进 */
 #define CONFIG_LINE_CURVE_MIN_RPM                    (-78.0f) /* 大误差最低巡航RPM；越接近0弯中越慢 */
@@ -186,8 +191,8 @@
 #define CONFIG_LINE_LOST_BASE_RPM                    (0.0f)  /* 短时丢线保留的共同速度/RPM；0为原地纠偏 */
 #define CONFIG_LINE_LOST_TIMEOUT_MS                  (600u)  /* 连续丢线故障延时/ms；超时后停止控制 */
 #define CONFIG_LINE_POSITION_FILTER_TAU_S            (0.030f)/* 位置低通/s；增大更稳但转弯响应更慢 */
-#define CONFIG_LINE_KP                               (0.025f)/* P单位deg/权重；增大转向更强，过大会蛇形 */
-#define CONFIG_LINE_KI                               (0.0f)  /* I单位deg/(权重*s)；消静差，过大会慢摆 */
+#define CONFIG_LINE_KP                               (0.0675f)/* P单位deg/权重；增大转向更强，过大会蛇形 */
+#define CONFIG_LINE_KI                               (0.000f)  /* I单位deg/(权重*s)；消静差，过大会慢摆 */
 #define CONFIG_LINE_KD                               (0.0015f)  /* D单位deg*s/权重；抑制摆动但放大跳变噪声 */
 #define CONFIG_LINE_OUTPUT_SIGN                      (-1)    /* 已标定转向极性；线路偏右时应向右修正 */
 #define CONFIG_LINE_YAW_OFFSET_MIN_DEG               (-60.0f)/* 位置环输出下限/deg；限制左向Yaw请求 */
@@ -197,12 +202,16 @@
 #define CONFIG_LINE_INTEGRAL_SEPARATION              (180.0f)/* |误差|超限时冻结同向积分/权重单位 */
 #define CONFIG_LINE_DERIVATIVE_FILTER_TAU_S          (0.04f) /* D项低通/s；增大更稳但阻尼响应更慢 */
 
-/* H题一圈赛程：按键和起停线同时成立才启动，驶离后再次压线才停车。 */
-#define CONFIG_RACE_MARKER_MIN_ACTIVE_CHANNELS       (5u)    /* 8路中至少5路判黑；斜压起停线可降至4 */
-#define CONFIG_RACE_MARKER_CONFIRM_MS                (20u)   /* 连续满足标志线条件的确认时间/ms */
-#define CONFIG_RACE_MARKER_RELEASE_MS                (80u)   /* 连续离开起跑线后允许判定终点/ms */
-#define CONFIG_RACE_FINISH_MIN_TIME_MS               (5000u) /* 起跑后终点检测屏蔽时间/ms */
+/* B21直接启动；到达开放时间后，在滑动窗内累计被斜终线扫过的通道。 */
+#define CONFIG_RACE_MARKER_SWEEP_WINDOW_MS          (200u)   /* 通道判黑时间戳的保留窗口/ms */
+#define CONFIG_RACE_MARKER_SWEEP_MIN_CHANNELS         (6u)   /* 窗内至少扫过5个不同通道 */
+#define CONFIG_RACE_MARKER_SWEEP_LEFT_MASK          (0x07u)  /* 左外侧S1~S3至少扫到1路 */
+#define CONFIG_RACE_MARKER_SWEEP_RIGHT_MASK         (0xE0u)  /* 右外侧S6~S8至少扫到1路 */
+#define CONFIG_RACE_MARKER_CONFIRM_MS                (20u)   /* 扫线覆盖条件连续确认/ms */
+#define CONFIG_RACE_FINISH_MIN_TIME_MS              (16000u) /* 当前16s后开放；需18s时改为18000u */
 #define CONFIG_RACE_FINISH_BRAKE_DELAY_MS            (0u)    /* 识别终点后等待制动/ms；增大会越线更远 */
+#define CONFIG_RACE_AUTO_STOP_TIME_MS               (17500u) /* 定时自动停车时间/ms；禁用启停线时到期锁存并制动 */
+#define CONFIG_RACE_AUTO_STOP_BRAKE_DELAY_MS         (0u)    /* 定时停车后的制动延迟/ms；0为立即制动 */
 
 /*
  * VOFA串口：UART0，PA10=TX、PA11=RX、DMA_CH0发送。
@@ -346,6 +355,13 @@
 #error "Line sensor ADC threshold must be in the uint16 range 0..65535"
 #endif
 
+#if (CONFIG_LINE_SENSOR_POSITION_MODE != \
+     CONFIG_LINE_SENSOR_POSITION_DIGITAL) && \
+    (CONFIG_LINE_SENSOR_POSITION_MODE != \
+     CONFIG_LINE_SENSOR_POSITION_ANALOG_WEIGHTED)
+#error "Line sensor position mode must be DIGITAL or ANALOG_WEIGHTED"
+#endif
+
 #if (CONFIG_LINE_SENSOR_UART_RESPONSE_TIMEOUT_MS == 0u) || \
     (CONFIG_LINE_SENSOR_UART_STALE_TIMEOUT_MS <= \
      CONFIG_LINE_SENSOR_UART_RESPONSE_TIMEOUT_MS) || \
@@ -377,18 +393,34 @@
 #error "CONFIG_B21_LINE_FOLLOW_MODE must be 0 or 1"
 #endif
 
+#if (CONFIG_RACE_INFINITE_MODE_DEFAULT > 1u)
+#error "CONFIG_RACE_INFINITE_MODE_DEFAULT must be 0 or 1"
+#endif
+
+#if (CONFIG_RACE_INFINITE_SPEED_PERCENT == 0u) || \
+    (CONFIG_RACE_INFINITE_SPEED_PERCENT > 100u)
+#error "CONFIG_RACE_INFINITE_SPEED_PERCENT must be in the range 1..100"
+#endif
+
 #if ((CONFIG_LINE_OUTPUT_SIGN != 1) && (CONFIG_LINE_OUTPUT_SIGN != -1))
 #error "CONFIG_LINE_OUTPUT_SIGN must be +1 or -1"
 #endif
 
-#if (CONFIG_RACE_MARKER_MIN_ACTIVE_CHANNELS == 0u) || \
-    (CONFIG_RACE_MARKER_MIN_ACTIVE_CHANNELS > 8u)
-#error "Race marker active channels must be in the range 1..8"
+#if (CONFIG_RACE_MARKER_SWEEP_MIN_CHANNELS == 0u) || \
+    (CONFIG_RACE_MARKER_SWEEP_MIN_CHANNELS > 8u)
+#error "Race marker swept channels must be in the range 1..8"
 #endif
 
-#if (CONFIG_RACE_MARKER_CONFIRM_MS == 0u) || \
-    (CONFIG_RACE_MARKER_RELEASE_MS == 0u)
-#error "Race marker confirmation and release times must be greater than zero"
+#if (CONFIG_RACE_MARKER_SWEEP_WINDOW_MS == 0u) || \
+    (CONFIG_RACE_MARKER_CONFIRM_MS == 0u)
+#error "Race marker sweep window and confirmation time must be nonzero"
+#endif
+
+#if ((CONFIG_RACE_MARKER_SWEEP_LEFT_MASK & 0xFFu) == 0u) || \
+    ((CONFIG_RACE_MARKER_SWEEP_RIGHT_MASK & 0xFFu) == 0u) || \
+    ((CONFIG_RACE_MARKER_SWEEP_LEFT_MASK & ~0xFFu) != 0u) || \
+    ((CONFIG_RACE_MARKER_SWEEP_RIGHT_MASK & ~0xFFu) != 0u)
+#error "Race marker sweep side masks must be nonzero 8-bit masks"
 #endif
 
 /* 编码器比例与时间检查 */

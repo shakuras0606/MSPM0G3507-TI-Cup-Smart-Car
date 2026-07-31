@@ -106,11 +106,11 @@ static void format_race_time(uint32_t elapsed_ms, char output[12])
     output[position] = '\0';
 }
 
-static const char *race_state_text(ScreenRaceState state)
+static const char *race_state_text(ScreenRaceState state, bool infinite_mode)
 {
     switch (state) {
         case SCREEN_RACE_RUN:
-            return "RUN";
+            return infinite_mode ? "LOOP" : "RUN";
         case SCREEN_RACE_BRAKE:
             return "BRAKE";
         case SCREEN_RACE_DONE:
@@ -119,7 +119,7 @@ static const char *race_state_text(ScreenRaceState state)
             return "FAULT";
         case SCREEN_RACE_WAIT:
         default:
-            return "WAIT";
+            return infinite_mode ? "I-WAIT" : "WAIT";
     }
 }
 
@@ -189,8 +189,14 @@ void ScreenTask_Init(void)
                       ST7735_BLACK, 1u);
     ST7735_DrawString(0u, 122u, "STATE S1->S8", ST7735_CYAN,
                        ST7735_BLACK, 1u);
-    ST7735_DrawString(4u, 144u, "POS:", ST7735_CYAN,
+#if (CONFIG_LINE_SENSOR_POSITION_MODE == \
+     CONFIG_LINE_SENSOR_POSITION_ANALOG_WEIGHTED)
+    ST7735_DrawString(4u, 144u, "APOS:", ST7735_CYAN,
                        ST7735_BLACK, 1u);
+#else
+    ST7735_DrawString(4u, 144u, "DPOS:", ST7735_CYAN,
+                       ST7735_BLACK, 1u);
+#endif
 }
 
 void ScreenTask_Update(int32_t rpm_m1, int32_t rpm_m2,
@@ -199,7 +205,8 @@ void ScreenTask_Update(int32_t rpm_m1, int32_t rpm_m2,
                        uint16_t line_raw_mask,
                        int16_t line_position, bool line_lost,
                        uint32_t race_elapsed_ms,
-                       ScreenRaceState race_state)
+                       ScreenRaceState race_state,
+                       bool infinite_mode)
 {
     char text[12];
     char raw_bits[9];
@@ -242,7 +249,7 @@ void ScreenTask_Update(int32_t rpm_m1, int32_t rpm_m2,
 
     ST7735_FillRect(76u, 3u, 52u, SCREEN_VALUE_H, ST7735_BLACK);
     ST7735_DrawString(76u, 3u, wt61_online ?
-                      race_state_text(race_state) : "IMU!",
+                      race_state_text(race_state, infinite_mode) : "IMU!",
                       wt61_online ?
                       ((race_state == SCREEN_RACE_FAULT) ?
                        ST7735_RED : ST7735_GREEN) : ST7735_RED,

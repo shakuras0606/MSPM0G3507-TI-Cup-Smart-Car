@@ -7,6 +7,7 @@
  *   - UART2：PA21(TX) / PA22(RX)，115200-8-N-1
  *   - UART 手动通信模式：只发送命令 2 读取 8 路 16 位原始模拟量
  *   - MSPM0 使用 project_config.h 中的阈值自行生成二值状态
+ *   - 位置可选择原二值等权平均或原始ADC直接加权平均
  *   - bit0=S1，bit7=S8；S1 默认作为最左通道
  *
  * values[] 仍保留 16 项以兼容现有屏幕函数；只有 values[0..7] 有效，
@@ -38,9 +39,9 @@ typedef struct
     uint16_t raw_mask;    /**< MSPM0 对模拟量阈值化后的低 8 位；bit0=S1。 */
     uint16_t active_mask; /**< 与 raw_mask 相同：1 表示该通道判定为黑线。 */
     uint16_t values[LINE_SENSOR16_CHANNEL_COUNT]; /**< S1~S8 模拟值；后 8 项为 0。 */
-    int16_t position;     /**< 8 路有效通道的加权质心。 */
-    uint16_t total_strength;
-    uint16_t peak_strength;
+    int16_t position;     /**< 当前所选算法的黑线位置，左负右正。 */
+    uint16_t total_strength; /**< 模拟模式为8路ADC和(超限饱和)；数字模式为黑线通道数。 */
+    uint16_t peak_strength;  /**< 模拟模式为最大单路ADC；数字模式为0或1。 */
     uint8_t active_count; /**< 当前判为黑线的物理通道数，范围 0..8。 */
     bool line_lost;
     bool online;          /**< 最近一次状态字节未超过串口离线时间。 */
@@ -68,7 +69,10 @@ void LineSensor16_Scan(void);
 /** 使用低 8 位二值掩码更新位置；保留给单元测试和兼容调用。 */
 void LineSensor16_UpdateDigital(uint16_t raw_mask, bool active_low);
 
-/** 使用 values[0..7] 更新模拟质心；上层正常巡线不调用此接口。 */
+/**
+ * 使用 values[0..7] 的原始ADC直接计算加权质心。
+ * 模拟位置计算不扣除判线阈值，也不使用单路限幅。
+ */
 void LineSensor16_UpdateAnalog(
     const uint16_t values[LINE_SENSOR16_CHANNEL_COUNT]);
 

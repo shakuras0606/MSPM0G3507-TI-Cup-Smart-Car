@@ -18,6 +18,7 @@
 const GPIO       = scripting.addModule("/ti/driverlib/GPIO", {}, false);
 const BUZZER     = GPIO.addInstance();
 const SPEED_KEY  = GPIO.addInstance();
+const MODE_KEY   = GPIO.addInstance();
 const LCD        = GPIO.addInstance();
 const ENCODER_IO = GPIO.addInstance();
 const UART       = scripting.addModule("/ti/driverlib/UART", {}, false);
@@ -58,7 +59,7 @@ BUZZER.associatedPins[0].$name               = "PIN";
 
 /*
  * 天猛星核心板板载按键 = PB21，低电平按下。
- * 本工程不使用扩展板 KEY1/PB12 作为速度按键。
+ * 扩展板 KEY1/PB12 = 单圈/无限巡线模式切换，低电平按下。
  * 注意：扩展板原理图把 PB21 同时引出为 IMU_CS_A；使用板载按键时，
  * 不得让外接 IMU 在该网络上主动驱动电平。
  * 使用内部上拉并由主循环软件消抖，避免人机按键中断干扰编码器 GROUP1 ISR。
@@ -69,6 +70,13 @@ SPEED_KEY.associatedPins[0].$name = "BUTTON";
 SPEED_KEY.associatedPins[0].direction = "INPUT";
 SPEED_KEY.associatedPins[0].internalResistor = "PULL_UP";
 SPEED_KEY.associatedPins[0].assignedPin = "21";
+
+MODE_KEY.port = "PORTB";
+MODE_KEY.$name = "MODE_KEY";
+MODE_KEY.associatedPins[0].$name = "MODE_BUTTON";
+MODE_KEY.associatedPins[0].direction = "INPUT";
+MODE_KEY.associatedPins[0].internalResistor = "PULL_UP";
+MODE_KEY.associatedPins[0].assignedPin = "12";
 
 /* ST7735软件SPI；BLK已直接接3.3V，不再占用MCU GPIO。 */
 LCD.port = "PORTB";
@@ -272,6 +280,7 @@ SYSCTL.clockTreeEn = true;
 /* Lock the chosen solution so future SysConfig versions do not move pins. */
 BUZZER.associatedPins[0].pin.$suggestSolution = "PA7";
 SPEED_KEY.associatedPins[0].pin.$suggestSolution = "PB21";
+MODE_KEY.associatedPins[0].pin.$suggestSolution = "PB12";
 LCD.associatedPins[0].pin.$suggestSolution = "PB9";
 LCD.associatedPins[1].pin.$suggestSolution = "PB8";
 LCD.associatedPins[2].pin.$suggestSolution = "PB14";

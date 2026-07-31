@@ -42,6 +42,9 @@ typedef struct
 /** 初始化位置PID；上电默认不驱动车轮。 */
 void LineControl_Init(uint32_t now_ms);
 
+/** 设置共同基础速度比例；1.0为普通速度，切换时由现有斜坡平滑过渡。 */
+void LineControl_SetSpeedScale(float scale);
+
 /** B21调用：停止状态开始巡线，运行状态立即停止。 */
 void LineControl_Toggle(uint32_t now_ms);
 

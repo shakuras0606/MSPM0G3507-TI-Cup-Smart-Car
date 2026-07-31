@@ -32,8 +32,8 @@
  *   两块MCU不能把CANTX/CANRX逻辑脚直接相连，应通过各自CAN收发器连接总线。
  *
  * 板载/扩展板:
- *   Buzzer PA7, 板载速度按键PB21(低有效), SWDIO/SWCLK PA19/PA20
- *   扩展板KEY1 PB12和KEY2 PB13当前不参与速度控制。
+ *   Buzzer PA7, 板载巡线启停键PB21(低有效), SWDIO/SWCLK PA19/PA20
+ *   扩展板KEY1 PB12=单圈/无限巡线切换；KEY2 PB13仍保留。
  *   扩展板将PB21引出为IMU_CS_A，使用板载按键时该网络不可被外设主动驱动。
  *
  * Hiwonder 8路红外巡线模块:

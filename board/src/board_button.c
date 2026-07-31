@@ -1,13 +1,12 @@
 /**
  * @file    board_button.c
- * @brief   板载PB21按键轮询和30 ms消抖实现
+ * @brief   PB21巡线启停键和PB12模式键轮询消抖实现
  *
- * 板载按键使用内部上拉：松开为高，按下接地为低。
+ * 两个按键均使用内部上拉：松开为高，按下接地为低。
  * 人机按键采用主循环轮询即可，不占用编码器所在的GPIO GROUP1中断。
  *
- * 消抖状态机维护两个电平：
- *   g_raw_pressed    = 最近一次直接读取的原始电平；
- *   g_stable_pressed = 已持续稳定达到消抖时间的确认电平。
+ * 每个按键都有完全独立的原始电平、稳定电平和变化时间，
+ * 同时按下也不会互相覆盖消抖状态。
  *
  * 只有“稳定状态从松开变为按下”时返回一次true。按住不重复触发，松开
  * 只更新内部状态但不产生事件，下一次重新按下才能再次触发。
@@ -18,19 +17,52 @@
 #include "project_config.h"
 #include "ti_msp_dl_config.h"
 
-/** 最近一次采样到的原始按压状态，可能仍含机械抖动。 */
-static bool g_raw_pressed;
+typedef struct
+{
+    bool raw_pressed;
+    bool stable_pressed;
+    uint32_t raw_change_ms;
+} ButtonDebounce;
 
-/** 已通过持续时间验证的稳定按压状态。 */
-static bool g_stable_pressed;
-
-/** 原始状态最近一次变化的系统时间，单位ms。 */
-static uint32_t g_raw_change_ms;
+static ButtonDebounce g_start_button;
+static ButtonDebounce g_mode_button;
 
 /** 读取板载PB21原始电平并转换为“true=按下”。 */
-static bool read_pressed(void)
+static bool read_start_pressed(void)
 {
     return (DL_GPIO_readPins(SPEED_KEY_PORT, SPEED_KEY_BUTTON_PIN) == 0u);
+}
+
+/** 读取扩展板KEY1/PB12并转换为“true=按下”。 */
+static bool read_mode_pressed(void)
+{
+    return (DL_GPIO_readPins(MODE_KEY_PORT,
+                             MODE_KEY_MODE_BUTTON_PIN) == 0u);
+}
+
+static void debounce_init(ButtonDebounce *button, bool pressed,
+                          uint32_t now_ms)
+{
+    button->raw_pressed = pressed;
+    button->stable_pressed = pressed;
+    button->raw_change_ms = now_ms;
+}
+
+static bool debounce_pressed_event(ButtonDebounce *button, bool raw,
+                                   uint32_t now_ms)
+{
+    if (raw != button->raw_pressed) {
+        button->raw_pressed = raw;
+        button->raw_change_ms = now_ms;
+    }
+
+    if ((button->stable_pressed != button->raw_pressed) &&
+        ((uint32_t)(now_ms - button->raw_change_ms) >=
+         CONFIG_SPEED_BUTTON_DEBOUNCE_MS)) {
+        button->stable_pressed = button->raw_pressed;
+        return button->stable_pressed;
+    }
+    return false;
 }
 
 /**
@@ -42,9 +74,8 @@ static bool read_pressed(void)
  */
 void BoardButton_Init(uint32_t now_ms)
 {
-    g_raw_pressed = read_pressed();
-    g_stable_pressed = g_raw_pressed;
-    g_raw_change_ms = now_ms;
+    debounce_init(&g_start_button, read_start_pressed(), now_ms);
+    debounce_init(&g_mode_button, read_mode_pressed(), now_ms);
 }
 
 /**
@@ -61,21 +92,12 @@ void BoardButton_Init(uint32_t now_ms)
  */
 bool BoardButton_PressedEvent(uint32_t now_ms)
 {
-    bool raw = read_pressed();
+    return debounce_pressed_event(
+        &g_start_button, read_start_pressed(), now_ms);
+}
 
-    /* 检测任何原始跳变，并从该时刻重新计算稳定持续时间。 */
-    if (raw != g_raw_pressed) {
-        g_raw_pressed = raw;
-        g_raw_change_ms = now_ms;
-    }
-
-    /* 只有候选状态尚未被确认且已经稳定足够久，才提交状态转换。 */
-    if ((g_stable_pressed != g_raw_pressed) &&
-        ((uint32_t)(now_ms - g_raw_change_ms) >=
-         CONFIG_SPEED_BUTTON_DEBOUNCE_MS)) {
-        g_stable_pressed = g_raw_pressed;
-        /* 按下返回true；松开提交状态但返回false。 */
-        return g_stable_pressed;
-    }
-    return false;
+bool BoardModeButton_PressedEvent(uint32_t now_ms)
+{
+    return debounce_pressed_event(
+        &g_mode_button, read_mode_pressed(), now_ms);
 }

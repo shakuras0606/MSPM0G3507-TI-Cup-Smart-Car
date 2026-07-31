@@ -8,7 +8,8 @@
  *
  * 本驱动不读取模块自动计算的数字状态，也不依赖模块灰度学习结果。
  * DMA_CH2 一次搬运完整 21 字节模拟帧，MSPM0 再按 project_config.h
- * 的阈值生成黑线掩码、加权位置和丢线状态。
+ * 的阈值生成黑线掩码和启停线统计。位置算法可在
+ * project_config.h 中选择原二值等权平均或原始ADC直接加权平均。
  */
 
 #include "line_sensor16.h"
@@ -77,6 +78,27 @@ static int16_t channel_position(uint8_t channel)
     return k_channel_position_weights[channel];
 }
 
+/** 根据统一阈值生成“1=黑线”的低8位掩码。 */
+static uint16_t build_black_mask(const uint16_t *values)
+{
+    uint16_t black_mask = 0u;
+    uint8_t index;
+
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        bool is_black;
+
+        if (CONFIG_LINE_SENSOR_ANALOG_BLACK_HIGH != 0u) {
+            is_black = values[index] > CONFIG_LINE_SENSOR_ADC_THRESHOLD;
+        } else {
+            is_black = values[index] < CONFIG_LINE_SENSOR_ADC_THRESHOLD;
+        }
+        if (is_black) {
+            black_mask |= (uint16_t)1u << index;
+        }
+    }
+    return black_mask;
+}
+
 static void start_rx_dma(uint8_t length)
 {
     DL_DMA_disableChannel(DMA, DMA_CH2_CHAN_ID);
@@ -115,6 +137,8 @@ static bool send_byte_dma(uint8_t value)
     return true;
 }
 
+#if (CONFIG_LINE_SENSOR_POSITION_MODE == \
+     CONFIG_LINE_SENSOR_POSITION_DIGITAL)
 static void restore_analog_values(void)
 {
     uint8_t index;
@@ -129,6 +153,7 @@ static void restore_analog_values(void)
         g_data.values[index] = 0u;
     }
 }
+#endif
 
 static uint8_t frame_checksum(const uint8_t *frame, uint8_t payload_size)
 {
@@ -143,23 +168,17 @@ static uint8_t frame_checksum(const uint8_t *frame, uint8_t payload_size)
 
 static void apply_analog_threshold(uint32_t now_ms)
 {
-    uint16_t black_mask = 0u;
+#if (CONFIG_LINE_SENSOR_POSITION_MODE == \
+     CONFIG_LINE_SENSOR_POSITION_ANALOG_WEIGHTED)
+    uint16_t values[LINE_SENSOR16_CHANNEL_COUNT] = {0u};
     uint8_t index;
 
     for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
-        bool is_black;
-
-        if (CONFIG_LINE_SENSOR_ANALOG_BLACK_HIGH != 0u) {
-            is_black =
-                g_analog_values[index] > CONFIG_LINE_SENSOR_ADC_THRESHOLD;
-        } else {
-            is_black =
-                g_analog_values[index] < CONFIG_LINE_SENSOR_ADC_THRESHOLD;
-        }
-        if (is_black) {
-            black_mask |= (uint16_t)1u << index;
-        }
+        values[index] = g_analog_values[index];
     }
+    LineSensor16_UpdateAnalog(values);
+#else
+    uint16_t black_mask = build_black_mask(g_analog_values);
 
     /*
      * black_mask 已经由 MSPM0 归一化为“1=黑线”，因此不再使用模块
@@ -167,6 +186,7 @@ static void apply_analog_threshold(uint32_t now_ms)
      */
     LineSensor16_UpdateDigital(black_mask, false);
     restore_analog_values();
+#endif
     g_data.online = true;
     g_data.last_update_ms = now_ms;
     ++g_data.state_frames;
@@ -368,6 +388,8 @@ void LineSensor16_UpdateDigital(uint16_t raw_mask, bool active_low)
 void LineSensor16_UpdateAnalog(
     const uint16_t values[LINE_SENSOR16_CHANNEL_COUNT])
 {
+    uint16_t samples[LINE_SENSOR_PHYSICAL_CHANNEL_COUNT];
+    uint16_t black_mask;
     uint32_t total = 0u;
     int64_t weighted_sum = 0;
     uint16_t peak = 0u;
@@ -377,35 +399,38 @@ void LineSensor16_UpdateAnalog(
         return;
     }
 
+    /*
+     * 先复制再清g_data.values，允许测试代码把g_data.values本身传回来，
+     * 也避免调用者数组与内部数组重叠时样本被提前清零。
+     */
+    for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
+        samples[index] = values[index];
+    }
+    black_mask = build_black_mask(samples);
+
     memset(g_data.values, 0, sizeof(g_data.values));
-    g_data.active_mask = 0u;
+    g_data.raw_mask = black_mask;
+    g_data.active_mask = black_mask;
     g_data.active_count = 0u;
     for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
-        uint16_t value = values[index];
+        uint16_t value = samples[index];
 
-        g_data.values[index] = value;
+        g_data.values[index] = samples[index];
         total += value;
-        weighted_sum += (int32_t)channel_position(index) * value;
+        weighted_sum +=
+            (int64_t)channel_position(index) * (int64_t)value;
         if (value > peak) {
             peak = value;
         }
-    }
-
-    if (peak != 0u) {
-        uint16_t threshold = (uint16_t)((peak + 1u) / 2u);
-
-        for (index = 0u; index < LINE_SENSOR_PHYSICAL_CHANNEL_COUNT; ++index) {
-            if (g_data.values[index] >= threshold) {
-                g_data.active_mask |= (uint16_t)1u << index;
-                ++g_data.active_count;
-            }
+        if ((black_mask & ((uint16_t)1u << index)) != 0u) {
+            ++g_data.active_count;
         }
     }
 
-    g_data.raw_mask = g_data.active_mask;
     g_data.total_strength =
         (total > UINT16_MAX) ? UINT16_MAX : (uint16_t)total;
     g_data.peak_strength = peak;
+    /* 模拟位置完全不依赖ADC阈值；只有八路全为0才无法求质心。 */
     g_data.line_lost = (total == 0u);
     if (!g_data.line_lost) {
         g_data.position = (int16_t)(weighted_sum / (int64_t)total);
