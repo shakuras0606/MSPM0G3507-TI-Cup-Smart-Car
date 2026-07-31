@@ -17,7 +17,7 @@ void Board_Init(void)
     /*
      * 初始化顺序：
      *   1. SYSCFG_DL_init() -- SysConfig 生成的代码，配置电源、时钟树、
-     *                          GPIO 引脚复用、PWM 定时器、UART 外设等
+     *                          GPIO、PWM、UART、MCAN和40MHz CAN时钟等
      *   2. BSP_Time_Init()  -- 配置 SysTick 为 1ms 中断
      *   3. BSP_Uart_Init()  -- 初始化 UART0 TX DMA 状态与完成中断
      */
@@ -31,7 +31,7 @@ void Board_EnterIdle(void)
     /*
      * WFI (Wait For Interrupt): ARMv6-M 特权指令
      * CPU 暂停取指，直到被 NVIC 挂起的中断唤醒。
-     * 唤醒源：SysTick (1ms) / UART0 TX DMA / UART1 RX DMA / 编码器 GPIO
+     * 唤醒源：SysTick (1ms) / UART DMA / 编码器 GPIO
      */
     __WFI();
 }

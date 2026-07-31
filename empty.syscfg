@@ -1,5 +1,5 @@
 /**
- * MSPM0G3507 project pin/peripheral configuration (v0.2.0 - 双电机版)
+ * MSPM0G3507 project pin/peripheral configuration (v0.3.0 - CAN加速度版)
  *
  * SysConfig 统一管理两路电机：
  *   M1 = TIMG7, PA26/PA27
@@ -7,6 +7,8 @@
  * 避免第二路手写寄存器初始化与 SDK/SysConfig 生成配置不一致。
  * 两路编码器 (PB0-PB3) 由 SysConfig 配置成双边沿 GPIO 中断输入，
  * 避免主循环轮询速度不稳定时漏计高速脉冲。
+ * CANFD0工作在经典CAN模式：PA12(TX)/PA13(RX)，500 kbps。
+ * CANCLK使用核心板PA5/PA6上的40 MHz外部晶振，CPU仍保持32 MHz。
  *
  * @cliArgs --device "MSPM0G350X" --part "Default" --package "LQFP-64(PM)" --product "mspm0_sdk@2.11.00.07"
  * @v2CliArgs --device "MSPM0G3507" --package "LQFP-64(PM)" --product "mspm0_sdk@2.11.00.07"
@@ -22,11 +24,30 @@ const UART       = scripting.addModule("/ti/driverlib/UART", {}, false);
 const HOST_UART  = UART.addInstance();
 const WT61_UART  = UART.addInstance();
 const LINE_UART  = UART.addInstance();
+const MCAN       = scripting.addModule("/ti/driverlib/MCAN", {}, false);
+const VEHICLE_CAN = MCAN.addInstance();
 const PWM        = scripting.addModule("/ti/driverlib/PWM", {}, false);
 const MOTOR_M1_PWM = PWM.addInstance();
 const MOTOR_M2_PWM = PWM.addInstance();
 const SYSCTL     = scripting.addModule("/ti/driverlib/SYSCTL");
 const Board      = scripting.addModule("/ti/driverlib/Board", {}, false);
+
+/*
+ * 天猛星核心板40 MHz外部晶振仅供HFCLK/CANCLK使用。
+ * MCLK仍使用32 MHz SYSOSC，因此现有PWM周期和软件延时基准不改变。
+ */
+const hfxMux = system.clockTree["EXHFMUX"];
+hfxMux.inputSelect = "EXHFMUX_XTAL";
+const hfxExt = system.clockTree["HFCLKEXT"];
+hfxExt.inputFreq = 40;
+const hfxt = system.clockTree["HFXT"];
+hfxt.enable = true;
+hfxt.HFXTStartup = 10;
+hfxt.HFCLKMonitor = true;
+hfxt.inputFreq = 40;
+hfxt.peripheral.$assign = "SYSCTL";
+hfxt.peripheral.hfxInPin.$assign = "PA5";
+hfxt.peripheral.hfxOutPin.$assign = "PA6";
 
 /* Optional buzzer already present on the core board. */
 BUZZER.port                                  = "PORTA";
@@ -179,6 +200,38 @@ LINE_UART.DMA_CHANNEL_TX.dstLength = "BYTE";
 LINE_UART.DMA_CHANNEL_TX.srcLength = "BYTE";
 
 /*
+ * 车体板到钢珠控制板使用经典CAN，降低对收发器和对端配置的要求。
+ * 禁止自动重传(DAR=true)：加速度是实时量，偶发丢帧时下一拍发送新数据，
+ * 不让总线恢复后继续发送已经过期的旧样本。
+ * 当前只发送，因此仅分配1个专用Tx Buffer，不分配Rx FIFO和滤波器。
+ */
+VEHICLE_CAN.$name                    = "VEHICLE_CAN";
+VEHICLE_CAN.fdMode                   = false;
+VEHICLE_CAN.darEnable                = true;
+VEHICLE_CAN.desiredNomRate           = 500;
+VEHICLE_CAN.desiredDataRate          = 0;
+VEHICLE_CAN.additionalCoreConfig     = true;
+VEHICLE_CAN.rrfe                     = true;
+VEHICLE_CAN.rrfs                     = true;
+VEHICLE_CAN.anfe                     = "1";
+VEHICLE_CAN.anfs                     = "1";
+VEHICLE_CAN.lss                      = 0;
+VEHICLE_CAN.lse                      = 0;
+VEHICLE_CAN.txStartAddr              = 0;
+VEHICLE_CAN.txBufNum                 = 1;
+VEHICLE_CAN.rxFIFO0startAddr         = 0;
+VEHICLE_CAN.rxFIFO1startAddr         = 0;
+VEHICLE_CAN.rxBufStartAddr           = 0;
+VEHICLE_CAN.rxFIFO0size              = 0;
+VEHICLE_CAN.rxFIFO1size              = 0;
+VEHICLE_CAN.flesa                    = 0;
+VEHICLE_CAN.txEventFIFOWaterMark     = 0;
+VEHICLE_CAN.overrideRetention        = true;
+VEHICLE_CAN.peripheral.$assign       = "CANFD0";
+VEHICLE_CAN.peripheral.rxPin.$assign = "PA13";
+VEHICLE_CAN.peripheral.txPin.$assign = "PA12";
+
+/*
  * M1 DRV8871 IN1/IN2: TIMG7 CCP0/CCP1 at 20 kHz
  * 严格按照立创天猛星 wiki 手册：PA26, PA27
  * CPUCLK = 32 MHz, timerCount = 32 MHz / 20 kHz = 1600.
@@ -206,7 +259,14 @@ MOTOR_M2_PWM.PWM_CHANNEL_0.dutyCycle = 0;
 MOTOR_M2_PWM.PWM_CHANNEL_1.$name = "MOTOR_M2_IN2";
 MOTOR_M2_PWM.PWM_CHANNEL_1.dutyCycle = 0;
 
+/* 保持32 MHz默认MCLK，只额外启用40 MHz HFXT作为CANCLK。 */
 SYSCTL.forceDefaultClkConfig = true;
+SYSCTL.CANCLKSource = "HFCLK";
+SYSCTL.useHFCLK_Manual = true;
+SYSCTL.HFCLKSource = "HFXT";
+SYSCTL.HFCLK_Freq = 40000000;
+SYSCTL.HFCLKMonitor = true;
+SYSCTL.HFXTStartup = 10;
 SYSCTL.clockTreeEn = true;
 
 /* Lock the chosen solution so future SysConfig versions do not move pins. */
@@ -225,6 +285,8 @@ WT61_UART.peripheral.txPin.$suggestSolution = "PA8";
 WT61_UART.peripheral.rxPin.$suggestSolution = "PA9";
 LINE_UART.peripheral.txPin.$suggestSolution = "PA21";
 LINE_UART.peripheral.rxPin.$suggestSolution = "PA22";
+VEHICLE_CAN.peripheral.txPin.$suggestSolution = "PA12";
+VEHICLE_CAN.peripheral.rxPin.$suggestSolution = "PA13";
 MOTOR_M1_PWM.peripheral.ccp0Pin.$suggestSolution = "PA26";
 MOTOR_M1_PWM.peripheral.ccp1Pin.$suggestSolution = "PA27";
 MOTOR_M2_PWM.peripheral.ccp0Pin.$suggestSolution = "PB15";

@@ -21,11 +21,14 @@
 #include "ti_msp_dl_config.h"
 
 #define WT61_HEADER             (0x55u)
+#define WT61_TYPE_ACCEL         (0x51u)
 #define WT61_TYPE_GYRO          (0x52u)
 #define WT61_TYPE_ANGLE         (0x53u)
 #define WT61_RAW_SCALE          (32768.0f)
+#define WT61_ACCEL_RANGE_G      (16.0f)
 #define WT61_ANGLE_RANGE_DEG    (180.0f)
 #define WT61_GYRO_RANGE_DPS     (2000.0f)
+#define WT61_TEMPERATURE_SCALE  (100.0f)
 
 /** DMA 每次直接写入的固定 11 字节暂存区。 */
 static volatile uint8_t g_dma_frame[CONFIG_WT61_FRAME_SIZE];
@@ -75,7 +78,27 @@ static void parse_frame(const uint8_t *frame)
     }
 
     now = BSP_Time_Millis();
-    if (frame[1] == WT61_TYPE_ANGLE) {
+    if (frame[1] == WT61_TYPE_ACCEL) {
+        /*
+         * WIT 0x51 帧：Ax、Ay、Az、温度，均为有符号小端16位。
+         * 官方协议固定按 ±16 g 满量程换算。这里保留传感器坐标系和
+         * 重力分量，不擅自做安装方向映射或重力补偿。
+         */
+        g_state.accel_x_g =
+            (float)read_i16_le(&frame[2]) * WT61_ACCEL_RANGE_G /
+            WT61_RAW_SCALE;
+        g_state.accel_y_g =
+            (float)read_i16_le(&frame[4]) * WT61_ACCEL_RANGE_G /
+            WT61_RAW_SCALE;
+        g_state.accel_z_g =
+            (float)read_i16_le(&frame[6]) * WT61_ACCEL_RANGE_G /
+            WT61_RAW_SCALE;
+        g_state.temperature_c =
+            (float)read_i16_le(&frame[8]) / WT61_TEMPERATURE_SCALE;
+        g_state.last_accel_ms = now;
+        g_state.accel_valid = true;
+        ++g_state.accel_frames;
+    } else if (frame[1] == WT61_TYPE_ANGLE) {
         /*
          * 0x53 帧顺序为 Roll、Pitch、Yaw，原始有符号数按 ±180° 满量程换算。
          * Pitch 的有效物理范围通常为 ±90°，但协议缩放仍使用 180/32768。
@@ -165,6 +188,16 @@ bool WT61_IsAngleFresh(uint32_t timeout_ms)
     (void)WT61_GetSnapshot(&snapshot);
     return snapshot.angle_valid &&
            ((uint32_t)(BSP_Time_Millis() - snapshot.last_angle_ms) <=
+            timeout_ms);
+}
+
+bool WT61_IsAccelerationFresh(uint32_t timeout_ms)
+{
+    WT61Snapshot snapshot;
+
+    (void)WT61_GetSnapshot(&snapshot);
+    return snapshot.accel_valid &&
+           ((uint32_t)(BSP_Time_Millis() - snapshot.last_accel_ms) <=
             timeout_ms);
 }
 

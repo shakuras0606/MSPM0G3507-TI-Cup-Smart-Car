@@ -9,7 +9,8 @@
  *   4. 5 Hz 局部刷新 ST7735。
  *   5. 位置外环产生Yaw修正目标，Yaw中环产生双轮差速RPM；
  *   6. 两个车轮速度内环分别输出PWM，形成三串级巡线；
- *   7. 200 Hz扫描16路巡线模块并在屏幕显示ADC、二值位和质心位置。
+ *   7. 200 Hz扫描8路巡线模块并在屏幕显示ADC、二值位和质心位置。
+ *   8. 100 Hz通过经典CAN向钢珠控制板发送WT61三轴加速度。
  *
  * 中断只做有硬实时要求的搬运/采样；协议、除法、显示均留在主循环。
  *
@@ -25,6 +26,7 @@
 
 #include "board_button.h"
 #include "bsp_time.h"
+#include "can_telemetry.h"
 #include "drv8871.h"
 #include "encoder.h"
 #include "line_control.h"
@@ -40,7 +42,8 @@ typedef struct
 {
     uint32_t last_vofa_ms;      /**< 上次组装VOFA帧的时间，单位ms。 */
     uint32_t last_screen_ms;    /**< 上次刷新ST7735动态区域的时间，单位ms。 */
-    uint32_t last_line_ms;      /**< 上次完成16通道扫描的时间，单位ms。 */
+    uint32_t last_line_ms;      /**< 上次完成8通道扫描的时间，单位ms。 */
+    uint32_t last_can_ms;       /**< 上次提交加速度CAN帧的调度时间，单位ms。 */
     uint32_t race_start_ms;     /**< 本圈按键有效并开始运动的时间。 */
     uint32_t race_finish_ms;    /**< 确认到达终点横线时锁存的本圈用时。 */
     uint32_t marker_change_ms;  /**< 起停线进入/离开确认的起始时间。 */
@@ -294,6 +297,7 @@ void App_Init(void)
      */
     /* UART DMA先于耗时屏幕初始化启动，避免屏幕延时期间丢掉姿态帧。 */
     WT61_Init();
+    CanTelemetry_Init();
     YawControl_Init(BSP_Time_Millis());
     LineControl_Init(BSP_Time_Millis());
     Vofa_Init(CONFIG_VOFA_PORT, CONFIG_VOFA_CHANNELS);
@@ -303,6 +307,7 @@ void App_Init(void)
     g_app.last_vofa_ms = now;
     g_app.last_screen_ms = now;
     g_app.last_line_ms = now;
+    g_app.last_can_ms = now;
     g_app.race_start_ms = now;
     g_app.race_finish_ms = 0u;
     g_app.marker_change_ms = now;
@@ -331,6 +336,15 @@ void App_RunOnce(void)
     WT61_Process();
     Encoder_Update();
     now = BSP_Time_Millis();
+    if ((uint32_t)(now - g_app.last_can_ms) >=
+        CONFIG_TICKS_FROM_HZ(CONFIG_TASK_CAN_TX_HZ)) {
+        /*
+         * 不补发过期帧：调度延迟后只发送当前最新WT61快照。CAN层若仍忙
+         * 会丢弃本拍，C板通过sequence和ACCEL_FRESH判断连续性。
+         */
+        g_app.last_can_ms = now;
+        (void)CanTelemetry_SendAcceleration(now);
+    }
     if ((uint32_t)(now - g_app.last_line_ms) >=
         CONFIG_TICKS_FROM_HZ(CONFIG_TASK_LINE_SENSOR_SCAN_HZ)) {
         g_app.last_line_ms = now;

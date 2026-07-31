@@ -21,10 +21,15 @@
  *   VOFA UART TX/RX:  PA10 / PA11 (UART0, 波特率见project_config.h, TX DMA_CH0)
  *   WT61 TX/RX:       PA9  / PA8  (UART1, 115200, RX DMA_CH1)
  *   8路巡线 TX/RX:    PA22 / PA21 (UART2, 115200, RX/TX DMA_CH2/CH3)
+ *   CAN CANTX/CANRX:  PA12 / PA13 (CANFD0经典CAN，500kbps)
  *
  * 传感器:
  *   WT61TTL:          模块 TX -> PA9，模块 RX -> PA8
- *   BMI270:           暂停（原 PA8/PA9 与 WT61 冲突）
+ *   BMI270:           暂停（PA8/PA9与WT61、PA12与CAN冲突）
+ *
+ * CAN:
+ *   扩展板U3已把PA12/PA13逻辑电平转换为CAN_H/CAN_L，并带可接入的120Ω终端。
+ *   两块MCU不能把CANTX/CANRX逻辑脚直接相连，应通过各自CAN收发器连接总线。
  *
  * 板载/扩展板:
  *   Buzzer PA7, 板载速度按键PB21(低有效), SWDIO/SWCLK PA19/PA20

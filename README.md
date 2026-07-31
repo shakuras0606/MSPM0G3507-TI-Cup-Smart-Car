@@ -3,7 +3,7 @@
 工程位置：`D:\CCS_Workspace\ti_3507\empty`
 
 开发环境：CCS 21.0、TI Clang 5.1.1 LTS、MSPM0 SDK 2.11.00.07、
-SysConfig 1.26.2。当前版本 v0.6.0。
+SysConfig 1.26.2。当前版本 v0.10.0。
 
 ## 1. 实时任务方案
 
@@ -17,6 +17,7 @@ SysConfig 1.26.2。当前版本 v0.6.0。
 | UART0 ISR | 每帧 TX DMA 完成 | 释放 VOFA DMA 发送缓冲区 |
 | 主循环 | 尽快 | WT61 解包、RPM 64 位除法、控制算法 |
 | 主循环定时任务 | 200 Hz | 两路独立车轮速度PID |
+| 主循环定时任务 | 100 Hz | WT61三轴加速度经典CAN发送 |
 | 主循环定时任务 | 100 Hz | VOFA JustFloat 发送 |
 | 主循环低优先级任务 | 5 Hz | ST7735 局部刷新 |
 
@@ -32,13 +33,16 @@ empty
 │  ├─ inc/app.h
 │  ├─ inc/screen_task.h
 │  ├─ inc/speed_control.h
+│  ├─ inc/can_telemetry.h
 │  ├─ src/app.c              协作式任务调度、VOFA 数据组织
+│  ├─ src/can_telemetry.c    WT61加速度0x180报文组织
 │  ├─ src/screen_task.c      ST7735 低频局部刷新
 │  └─ src/speed_control.c    双轮独立定速PID
 ├─ board                     板级初始化和人工可读引脚表
 ├─ bsp
 │  ├─ bsp_time.*             1 ms SysTick
-│  └─ bsp_uart.*             UART0 上位机 TX DMA
+│  ├─ bsp_uart.*             UART0 上位机 TX DMA
+│  └─ bsp_can.*              CANFD0经典CAN非阻塞发送
 ├─ components
 │  ├─ byte_ring.*            ISR/主循环环形缓冲
 │  ├─ comm_protocol.*        保留的 AA55 协议组件
@@ -61,17 +65,18 @@ empty
 | 模块 | 信号 | MSPM0G3507 | 参数 |
 |---|---|---:|---|
 | ST7735 | MOSI/SCLK | PB8/PB9 | 软件 SPI |
-| ST7735 | RST/DC/CS/BL | PB10/PB11/PB14/PB26 | GPIO |
+| ST7735 | RST/DC/CS/BL | PB10/PB11/PB14/3.3V | BL不占MCU引脚 |
 | DRV8871 M1 | IN1/IN2 | PA26/PA27 | TIMG7，20 kHz |
 | DRV8871 M2 | BIN1/BIN2 | PB15/PB16 | TIMG8，20 kHz |
 | 编码器 M1 | A/B | PB0/PB1 | GPIO 双边沿中断 |
 | 编码器 M2 | A/B | PB2/PB3 | GPIO 双边沿中断 |
-| CH343/VOFA | UART0 TX/RX | PA10/PA11 | 921600，TX DMA_CH0 |
+| CH343/VOFA | UART0 TX/RX | PA10/PA11 | 115200，TX DMA_CH0 |
 | WT61TTL | UART1 TX/RX | PA8/PA9 | 115200，RX DMA_CH1 |
+| 8路巡线 | UART2 TX/RX | PA21/PA22 | 115200，RX/TX DMA_CH2/CH3 |
+| CAN | CANTX/CANRX | PA12/PA13 | 经典CAN，500kbps |
 | 板载速度按键 | GPIO | PB21 | 低有效、内部上拉、30 ms消抖 |
 | 蜂鸣器 | GPIO | PA7 | 预留 |
 | SWD | SWDIO/SWCLK | PA19/PA20 | 调试固定 |
-| 16 路巡线 | transport | 未分配 | 等模块协议确定 |
 
 WT61 接线方向：
 
@@ -144,9 +149,14 @@ WT61 标准帧固定为 11 字节：
 0x55 TYPE DATA0...DATA7 CHECKSUM
 ```
 
+- `TYPE=0x51`：X/Y/Z 加速度，换算系数 `16/32768 g`；
 - `TYPE=0x52`：X/Y/Z 角速度，换算系数 `2000/32768 deg/s`；
 - `TYPE=0x53`：Roll/Pitch/Yaw，换算系数 `180/32768 deg`；
 - 校验为前 10 字节累加和的低 8 位。
+
+WT61加速度以100 Hz打包到标准ID `0x180`：三轴`int16_t`毫重力、序号和
+有效状态，共8字节。完整ID规划、状态位和钢珠控制板解析示例见
+[`docs/CAN_加速度通信协议.md`](docs/CAN_加速度通信协议.md)。
 
 VOFA+ 设置：
 
@@ -154,7 +164,7 @@ VOFA+ 设置：
 - 波特率：`CONFIG_VOFA_UART_BAUD_RATE`，当前为`921600`；
 - 数据引擎：`JustFloat`；
 - 发送频率：100 Hz；
-- 通道数：10。
+- 通道数：12。
 
 VOFA串口参数集中在`project_config.h`，修改波特率、停止位或校验后，
 `BSP_Uart_Init()`会在启动时重新应用到UART0；PA10/PA11和DMA_CH0仍在

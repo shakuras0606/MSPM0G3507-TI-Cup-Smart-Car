@@ -14,7 +14,7 @@
 
 /* 项目标识 */
 #define PROJECT_NAME                              "TI3507-CAR" /* 工程名称 */
-#define PROJECT_VERSION                           "0.9.1"      /* 固件版本：8路UART原始模拟阈值巡线 */
+#define PROJECT_VERSION                           "0.10.0"     /* 加入WT61加速度与经典CAN前馈遥测 */
 
 /*
  * 系统任务与三级 PID 执行频率
@@ -28,6 +28,7 @@
 #define CONFIG_PID_LINE_HZ                        (100u)  /* 巡线外环更新率/Hz；过高会放大二值位置跳变 */
 #define CONFIG_TASK_ENCODER_CAPTURE_HZ            (CONFIG_PID_SPEED_HZ) /* 编码器快照率/Hz；与速度环同步 */
 #define CONFIG_TASK_LINE_SENSOR_SCAN_HZ           (200u)  /* 8路原始模拟帧请求/处理率/Hz */
+#define CONFIG_TASK_CAN_TX_HZ                     (100u)  /* WT61加速度CAN发送率/Hz */
 #define CONFIG_TASK_VOFA_HZ                       (100u)  /* JustFloat遥测帧率/Hz */
 #define CONFIG_TASK_SCREEN_HZ                     (5u)    /* ST7735刷新率/Hz；低优先级任务 */
 
@@ -40,6 +41,16 @@
 #define CONFIG_WT61_RX_RING_SIZE                  (256u)  /* WT61 RX 环形缓冲区/字节 */
 #define CONFIG_COMM_MAX_PAYLOAD                   (64u)   /* AA55 最大载荷/字节 */
 #define CONFIG_COMM_TX_BUFFER_SIZE                (72u)   /* AA55 发送缓冲区/字节 */
+
+/*
+ * 车体板 -> 钢珠控制板：经典CAN、11位标准ID、8字节。
+ * empty.syscfg固定为500 kbps；两端波特率必须一致。
+ * 0x180当前为三轴加速度，0x181~0x187保留车体扩展，0x188~0x18F保留C板回传。
+ */
+#define CONFIG_CAN_NOMINAL_BIT_RATE               (500000u) /* 文档镜像值；实际位时序由SysConfig生成 */
+#define CONFIG_CAN_ID_ACCEL                       (0x180u)   /* 三轴加速度快速帧 */
+#define CONFIG_CAN_PROTOCOL_VERSION               (1u)       /* 状态字节bit7..5，取值0..7 */
+#define CONFIG_CAN_ACCEL_STALE_TIMEOUT_MS          (50u)      /* 超时后清ACCEL_FRESH，C板应关闭前馈 */
 
 /* DRV8871：32 MHz / 1600 = 20 kHz */
 #define CONFIG_MOTOR_PWM_PERIOD_COUNTS            (1600u) /* PWM 周期计数，须与 SysConfig 一致 */
@@ -136,7 +147,7 @@
 #define CONFIG_BMI270_SPI_HALF_CYCLES              (4u)    /* 软件 SPI 半周期延时计数 */
 #define CONFIG_WT61_FRAME_SIZE                     (11u)   /* WT61 标准帧长度/字节 */
 #define CONFIG_WT61_STALE_TIMEOUT_MS               (500u)  /* WT61 离线超时/ms */
-#define CONFIG_LINE_SENSOR_ADC_THRESHOLD           (800u)  /* MSPM0模拟量判线阈值；先看屏幕原始值再调整 */
+#define CONFIG_LINE_SENSOR_ADC_THRESHOLD           (1000u)  /* MSPM0模拟量判线阈值；先看屏幕原始值再调整 */
 #define CONFIG_LINE_SENSOR_ANALOG_BLACK_HIGH       (1u)    /* 1=模拟值>阈值为黑线；0=模拟值<阈值为黑线 */
 #define CONFIG_LINE_SENSOR_REVERSE_ORDER           (0u)    /* 0=S1左/S8右；实物安装相反时改为1 */
 #define CONFIG_LINE_SENSOR_UART_RESPONSE_TIMEOUT_MS (20u)  /* 命令响应超时/ms */
@@ -255,6 +266,7 @@
     (CONFIG_PID_LINE_HZ == 0u) || \
     (CONFIG_TASK_ENCODER_CAPTURE_HZ == 0u) || \
     (CONFIG_TASK_LINE_SENSOR_SCAN_HZ == 0u) || \
+    (CONFIG_TASK_CAN_TX_HZ == 0u) || \
     (CONFIG_TASK_VOFA_HZ == 0u) || \
     (CONFIG_TASK_SCREEN_HZ == 0u)
 #error "Task and PID frequencies must be greater than zero"
@@ -264,10 +276,23 @@
     ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_PID_LINE_HZ) != 0u) || \
     ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_TASK_ENCODER_CAPTURE_HZ) != 0u) || \
     ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_TASK_LINE_SENSOR_SCAN_HZ) != 0u) || \
+    ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_TASK_CAN_TX_HZ) != 0u) || \
     ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_TASK_VOFA_HZ) != 0u) || \
     ((CONFIG_SCHEDULER_TICK_HZ % CONFIG_TASK_SCREEN_HZ) != 0u)
 #error "Task and PID frequencies must divide the 1000 Hz scheduler tick exactly"
 #endif
+#endif
+
+#if (CONFIG_CAN_NOMINAL_BIT_RATE != 500000u)
+#error "CONFIG_CAN_NOMINAL_BIT_RATE must match empty.syscfg 500 kbps"
+#endif
+
+#if (CONFIG_CAN_ID_ACCEL > 0x7FFu)
+#error "CONFIG_CAN_ID_ACCEL must be an 11-bit standard CAN identifier"
+#endif
+
+#if (CONFIG_CAN_PROTOCOL_VERSION > 7u)
+#error "CONFIG_CAN_PROTOCOL_VERSION must fit in status bits 7..5"
 #endif
 
 /*
